@@ -1,0 +1,71 @@
+/* Jot Import: the "choose notes" dialog and the new-export notice. */
+
+.jot-import-link-modal .jot-import-lede {
+  color: var(--text-muted);
+  margin-top: 0;
+}
+
+.jot-import-link-list {
+  max-height: 60vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.jot-import-link-row + .jot-import-link-row {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Spacing lives on the row: Obsidian zeroes a modal setting's padding when
+   it is its parent's first or last child, which each of these is. */
+.jot-import-link-row {
+  padding: var(--size-4-3) 0;
+}
+
+.jot-import-target {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--size-4-1);
+  margin-top: var(--size-2-1);
+  color: var(--text-normal);
+  word-break: break-word;
+}
+
+.jot-import-target-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  --icon-size: var(--icon-xs);
+  padding-top: 2px;
+}
+
+.jot-import-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--size-4-1);
+  margin-top: var(--size-4-2);
+}
+
+.jot-import-chips-label {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.jot-import-chips .jot-import-chip {
+  height: auto;
+  padding: 2px var(--size-4-2);
+  font-size: var(--font-ui-smaller);
+  border-radius: var(--radius-l);
+}
+
+.jot-import-suggestion-note {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.jot-import-notice-actions {
+  display: flex;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-2);
+}

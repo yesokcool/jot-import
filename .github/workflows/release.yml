@@ -1,0 +1,45 @@
+# Pushing a tag that equals manifest.json's version (no "v" prefix) builds the
+# plugin and opens a DRAFT GitHub release with main.js, manifest.json and
+# styles.css attached.
+# Review the draft, then publish it; Obsidian's directory picks releases up
+# from GitHub. Only works when this folder is the root of its own repository.
+name: Release Obsidian plugin
+on:
+  push:
+    tags:
+      - "*"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Build plugin
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+            --title="$tag" \
+            --draft \
+            main.js manifest.json styles.css

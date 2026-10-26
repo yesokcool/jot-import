@@ -1,0 +1,10 @@
+{
+	"id": "jot-import",
+	"name": "Jot Import",
+	"version": "1.0.0",
+	"minAppVersion": "1.13.0",
+	"description": "Import a Jot export into your notes: each category's jots go into the same-named note, or one you choose, at the top, at the bottom, or under a heading.",
+	"author": "YesOkCool",
+	"authorUrl": "https://yesokcool.com",
+	"isDesktopOnly": false
+}

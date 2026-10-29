@@ -1,6 +1,6 @@
 # Jot Import
 
-Import a [Jot](https://jot.yesokcool.com) export into your notes. Each
+Import a [Jot](https://jotquick.app) export into your notes. Each
 category's jots go into that category's note, so a round of jotting on
 your phone lands in the right places in your vault without any pasting.
 

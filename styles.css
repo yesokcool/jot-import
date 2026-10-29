@@ -1,4 +1,17 @@
-/* Jot Import: the "choose notes" dialog and the new-export notice. */
+/* Jot Import: the "choose notes" dialogs and the new-export notice.
+   Obsidian's CSS variables only, so every theme, light and dark, applies. */
+
+/* The title says what the dialog is for: bigger, in the accent color. */
+.jot-import-link-modal .modal-title {
+  font-size: var(--font-ui-large);
+  color: var(--text-accent);
+}
+
+/* Phones cut a modal title to one line; this one wraps instead. */
+.is-phone .jot-import-link-modal .modal-title {
+  white-space: normal;
+  text-overflow: clip;
+}
 
 .jot-import-link-modal .jot-import-lede {
   color: var(--text-muted);
@@ -12,31 +25,74 @@
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
+.jot-import-link-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--size-4-3);
+  padding: var(--size-4-3) 0;
+}
+
 .jot-import-link-row + .jot-import-link-row {
   border-top: 1px solid var(--background-modifier-border);
 }
 
-/* Spacing lives on the row: Obsidian zeroes a modal setting's padding when
-   it is its parent's first or last child, which each of these is. */
-.jot-import-link-row {
-  padding: var(--size-4-3) 0;
+.jot-import-link-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* "Ideas → Dev.md › Inbox": the category, then where it goes, which is what
+   the dialog is about, in the accent color. */
+.jot-import-link-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--size-4-2);
+  row-gap: var(--size-2-1);
+  font-size: var(--font-ui-medium);
+  line-height: var(--line-height-tight);
+}
+
+.jot-import-link-category {
+  color: var(--text-normal);
+  font-weight: var(--font-medium);
+}
+
+.jot-import-link-arrow {
+  color: var(--text-faint);
+}
+
+.jot-import-link-note {
+  color: var(--text-accent);
+  font-weight: var(--font-semibold);
+  word-break: break-word;
+}
+
+.jot-import-link-heading {
+  color: var(--text-accent);
+  word-break: break-word;
 }
 
 .jot-import-target {
   display: flex;
   align-items: flex-start;
   gap: var(--size-4-1);
-  margin-top: var(--size-2-1);
-  color: var(--text-normal);
+  margin-top: var(--size-4-1);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
   word-break: break-word;
 }
 
 .jot-import-target-icon {
   display: inline-flex;
   flex-shrink: 0;
-  color: var(--text-muted);
+  color: var(--text-faint);
   --icon-size: var(--icon-xs);
-  padding-top: 2px;
+  padding-top: 1px;
+}
+
+.jot-import-target-new {
+  color: var(--text-faint);
 }
 
 .jot-import-chips {
@@ -48,15 +104,46 @@
 }
 
 .jot-import-chips-label {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  margin-right: var(--size-2-1);
 }
 
+/* Accent-tinted, so the one-tap alternatives stand out from the text.
+   Tinted with the text's own accent, which some themes set apart from the
+   button accent. */
 .jot-import-chips .jot-import-chip {
   height: auto;
   padding: 2px var(--size-4-2);
   font-size: var(--font-ui-smaller);
   border-radius: var(--radius-l);
+  color: var(--text-accent);
+  background-color: color-mix(in srgb, var(--text-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-accent) 35%, transparent);
+  box-shadow: none;
+}
+
+.jot-import-chips .jot-import-chip:hover {
+  color: var(--text-accent-hover);
+  background-color: color-mix(in srgb, var(--text-accent) 22%, transparent);
+}
+
+.jot-import-link-row .jot-import-change {
+  flex-shrink: 0;
+}
+
+/* Obsidian zeroes a modal setting's padding when it's its parent's last
+   child, which the buttons row is. */
+.jot-import-link-buttons {
+  padding-top: var(--size-4-4);
+}
+
+/* The "Change" dialog: what the typed note and heading will be. */
+.jot-import-destination-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin: calc(-1 * var(--size-4-2)) 0 var(--size-4-2);
+  word-break: break-word;
 }
 
 .jot-import-suggestion-note {
@@ -64,8 +151,28 @@
   font-size: var(--font-ui-smaller);
 }
 
+.jot-import-heading-suggestion {
+  display: flex;
+  align-items: baseline;
+  gap: var(--size-4-2);
+}
+
+.jot-import-heading-level {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  font-family: var(--font-monospace);
+}
+
 .jot-import-notice-actions {
   display: flex;
   gap: var(--size-4-2);
   margin-top: var(--size-4-2);
+}
+
+/* Phones: the button goes under the row's text instead of squeezing it. */
+@media (max-width: 480px) {
+  .jot-import-link-row {
+    flex-direction: column;
+    gap: var(--size-4-2);
+  }
 }

@@ -1,6 +1,8 @@
 import { App, PluginSettingTab, type SettingDefinition, type SettingDefinitionItem } from "obsidian";
+import { headingName } from "./format";
+import { DestinationModal } from "./link-modal";
 import type JotImportPlugin from "./main";
-import { linkedIdsFrom } from "./routing";
+import { cleanFolder, headingsFrom, linkedIdsFrom } from "./routing";
 
 /**
  * Declarative settings (Obsidian 1.13), so every option shows up in
@@ -27,8 +29,8 @@ export class JotImportSettingTab extends PluginSettingTab {
         control: {
           type: "dropdown",
           key: "mode",
-          options: { name: "Same-named note", linked: "Note you choose" },
-          defaultValue: "name",
+          options: { linked: "Note you choose", name: "Same-named note" },
+          defaultValue: "linked",
         },
       },
       {
@@ -41,11 +43,13 @@ export class JotImportSettingTab extends PluginSettingTab {
       {
         name: "Position",
         desc: "Where new jots go in the note, or in the heading's section.",
-        control: { type: "dropdown", key: "position", options: { bottom: "Bottom", top: "Top" }, defaultValue: "bottom" },
+        control: { type: "dropdown", key: "position", options: { top: "Top", bottom: "Bottom" }, defaultValue: "top" },
       },
       {
         name: "Heading",
-        desc: "Put the jots under this heading. It's added at the end of the note if missing. Type ### Inbox to choose its level.",
+        desc: linked
+          ? "Put the jots under this heading. It's added at the end of the note if missing. Type ### Inbox to choose its level. A linked note can have its own heading, below."
+          : "Put the jots under this heading. It's added at the end of the note if missing. Type ### Inbox to choose its level.",
         control: { type: "text", key: "heading", placeholder: "Inbox" },
       },
       {
@@ -67,18 +71,36 @@ export class JotImportSettingTab extends PluginSettingTab {
           (link): SettingDefinition => ({
             // Unique per row (the framework keys rows by name); the row shows the category alone.
             name: `${link.category}: ${link.path}`,
-            desc: link.path,
+            desc: this.where(link),
             aliases: [link.category],
             render: (setting) => {
               setting
                 .setName(link.category)
-                .setDesc(link.path)
+                .setDesc(this.where(link))
+                .addExtraButton((btn) =>
+                  btn
+                    .setIcon("heading")
+                    .setTooltip("Change heading")
+                    .onClick(() => {
+                      const context = this.plugin.linkContext([]);
+                      new DestinationModal(this.app, context, {
+                        title: `Heading for ${link.category}`,
+                        note: null,
+                        path: link.path,
+                        heading: link.heading ?? this.plugin.settings.heading,
+                        onDone: ({ heading }) => {
+                          void this.plugin.setCategoryHeading(link.path, link.id, heading).then(() => this.update());
+                        },
+                      }).open();
+                    }),
+                )
                 .addExtraButton((btn) =>
                   btn
                     .setIcon("unlink")
                     .setTooltip("Unlink. The note and its jots stay.")
-                    .onClick(() => {
-                      void this.plugin.unlink(link.path, link.id).then(() => this.update());
+                    .onClick(async () => {
+                      await this.plugin.unlink(link.path, link.id);
+                      this.update();
                     }),
                 );
             },
@@ -92,19 +114,28 @@ export class JotImportSettingTab extends PluginSettingTab {
   // history and category names saved beside them.
   async setControlValue(key: string, value: unknown) {
     const settings = this.plugin.settings as unknown as Record<string, unknown>;
-    settings[key] = key === "folder" && typeof value === "string" ? value.replace(/^\/+|\/+$/g, "") : value;
+    settings[key] = key === "folder" && typeof value === "string" ? cleanFolder(value) : value;
+    this.plugin.chooseSetting(key);
     await this.plugin.saveSettings();
     if (key === "mode") this.update();
   }
 
-  /** Every (note, category) link in the vault, by category name. */
-  private linkedNotes(): Array<{ path: string; id: string; category: string }> {
-    const out: Array<{ path: string; id: string; category: string }> = [];
+  /** "Projects/Dev.md › Inbox": the note, and the heading the category's jots go under, if any. */
+  private where(link: { path: string; heading?: string }): string {
+    const heading = headingName(link.heading ?? this.plugin.settings.heading);
+    return heading ? `${link.path} › ${heading}` : link.path;
+  }
+
+  /** Every (note, category) link in the vault, by category name, with the category's own heading if it has one. */
+  private linkedNotes(): Array<{ path: string; id: string; category: string; heading?: string }> {
+    const out: Array<{ path: string; id: string; category: string; heading?: string }> = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
-      const ids = linkedIdsFrom(this.app.metadataCache.getFileCache(file)?.frontmatter);
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      const ids = linkedIdsFrom(frontmatter);
+      const headings = headingsFrom(frontmatter);
       this.plugin.noteLinked(file.path, ids.length > 0);
       for (const id of ids) {
-        out.push({ path: file.path, id, category: this.plugin.categoryName(id) });
+        out.push({ path: file.path, id, category: this.plugin.categoryName(id), heading: headings[id] });
       }
     }
     return out.sort((a, b) => a.category.localeCompare(b.category) || a.path.localeCompare(b.path));

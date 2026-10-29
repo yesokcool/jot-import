@@ -5,6 +5,9 @@ import { globalIgnores, defineConfig } from "eslint/config";
 // Obsidian's own rule set (eslint-plugin-obsidianmd) encodes the plugin
 // guidelines: sentence case, no inline styles, no sample names, vault API
 // use, mobile-safe regexes, settings-tab conventions. `npm run lint`.
+// package.json is linted too, as the review bot does: its
+// depend/ban-dependencies rule rejects packages Node or the web already
+// provide (builtin-modules was one).
 export default defineConfig(
   globalIgnores([
     "node_modules",
@@ -13,7 +16,6 @@ export default defineConfig(
     "version-bump.mjs",
     "versions.json",
     "main.js",
-    "package.json",
     "package-lock.json",
     "tsconfig.json",
     "eslint.config.mts",

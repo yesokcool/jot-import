@@ -3,7 +3,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { deflateRawSync } from "node:zlib";
 import { parseJotExport } from "../src/format.ts";
-import { crc32, isSafeEntryName, looksLikeZip, readZipDirectory, readZipEntry, ZIP_LIMITS, ZipError } from "../src/zip.ts";
+import {
+  crc32,
+  isSafeEntryName,
+  looksLikeZip,
+  MOBILE_ZIP_LIMITS,
+  readZipDirectory,
+  readZipEntry,
+  wholeBuffer,
+  ZIP_LIMITS,
+  ZipError,
+} from "../src/zip.ts";
 import { openZipExport } from "../src/zip-export.ts";
 
 /**
@@ -174,6 +184,51 @@ test("huge files: a size over the limit is refused before anything is unpacked",
   ]);
   const opened = await openZipExport(bomb);
   await assert.rejects(opened.read(opened.media.get("media/AAAA.png")!), /larger than it says/);
+});
+
+test("on a phone or tablet the limits are half as large, with the same notices", async () => {
+  const MB = 1024 * 1024;
+  assert.equal(MOBILE_ZIP_LIMITS.entryBytes, 256 * MB);
+  assert.equal(MOBILE_ZIP_LIMITS.totalBytes, 512 * MB);
+  assert.equal(MOBILE_ZIP_LIMITS.zipBytes, 512 * MB);
+  assert.equal(MOBILE_ZIP_LIMITS.textBytes, ZIP_LIMITS.textBytes);
+  // Sizes as the zip states them; nothing that large is unpacked to check.
+  const video = buildZip([
+    { name: "export/export.md", data: EXPORT },
+    { name: "export/media/AAAA.png", data: "x", size: 300 * MB },
+  ]);
+  await openZipExport(video);
+  await assert.rejects(openZipExport(video, MOBILE_ZIP_LIMITS), (e: unknown) => e instanceof ZipError && e.message === "A file in the zip is too large to import.");
+  const three = [
+    "<!-- jot:export v=1 -->",
+    '<!-- jot:category name="Places" -->',
+    "- ![a](media/A.png) ![b](media/B.png) ![c](media/C.png)",
+    "<!-- /jot:category -->",
+  ].join("\n");
+  const many = buildZip([
+    { name: "export/export.md", data: three },
+    ...["A", "B", "C"].map((n) => ({ name: `export/media/${n}.png`, data: "x", size: 200 * MB })),
+  ]);
+  assert.equal((await openZipExport(many)).media.size, 3);
+  await assert.rejects(
+    openZipExport(many, MOBILE_ZIP_LIMITS),
+    (e: unknown) => e instanceof ZipError && e.message === "The export's attachments are too large to import together.",
+  );
+  assert.throws(() => readZipDirectory({ length: 600 * MB } as Uint8Array, MOBILE_ZIP_LIMITS), /The zip is too large to import\./);
+});
+
+test("an unpacked file is saved from its own buffer, not a copy", async () => {
+  const zip = await openZipExport(ALL);
+  for (const entry of zip.media.values()) {
+    const bytes = await zip.read(entry);
+    assert.equal(wholeBuffer(bytes), bytes.buffer, entry.name);
+  }
+  const stored = await openZipExport(buildZip([{ name: "export/export.md", data: EXPORT }, { name: "export/media/AAAA.png", data: "png!", stored: true }]));
+  const bytes = await stored.read(stored.media.get("media/AAAA.png")!);
+  assert.equal(wholeBuffer(bytes), bytes.buffer, "a stored entry too");
+  // A view into a larger buffer is copied, so nothing around it is saved.
+  const view = new Uint8Array([9, 1, 2, 3, 9]).subarray(1, 4);
+  assert.deepEqual([...new Uint8Array(wholeBuffer(view))], [1, 2, 3]);
 });
 
 test("damaged and unsupported zips say why", async () => {

@@ -263,7 +263,7 @@ export async function runImport(
         });
       }
       const insert = write.heading === undefined ? options : { ...options, heading: write.heading };
-      await port.process(write.path, (data) => insertIntoNote(data, body, insert));
+      await port.process(write.path, (data) => insertIntoNote(data, body, insert, basename));
       if (!result.notes.includes(basename)) result.notes.push(basename);
       written++;
     } catch (e) {
@@ -389,10 +389,15 @@ export class OfferedExports {
    * never adds a second; the import dialog lists them all.
    */
   claim(path: string, mtime: number, now: number): boolean {
-    if (now - mtime > OFFER_WINDOW || mtime <= this.newest || this.paths.has(path)) return false;
+    if (!this.mayClaim(path, mtime, now)) return false;
     this.paths.add(path);
     this.newest = mtime;
     return true;
+  }
+
+  /** Whether `claim` would say yes, without claiming: checked before the file is read, so an old export is never read to be offered. */
+  mayClaim(path: string, mtime: number, now: number): boolean {
+    return now - mtime <= OFFER_WINDOW && mtime > this.newest && !this.paths.has(path);
   }
 
   has(path: string): boolean {
@@ -402,6 +407,72 @@ export class OfferedExports {
   release(path: string): void {
     this.paths.delete(path);
   }
+}
+
+/**
+ * The new-export notice on screen (one at a time), with the file and the
+ * export it offers, so it goes away once its Import button has nothing
+ * left to do: the file was trashed or deleted, or that export was
+ * imported another way (the command, the import dialog, a file picked
+ * from disk, another device). `file` is the vault's own file object,
+ * whose path follows a rename.
+ */
+export class OfferNotice<N extends { hide(): void }> {
+  private shown: { notice: N; file: { path: string }; print: string } | null = null;
+
+  /** Show this notice in place of the one before. `print`: the offered export's fingerprint. */
+  set(notice: N, file: { path: string }, print: string): void {
+    this.hide();
+    this.shown = { notice, file, print };
+  }
+
+  /** Hide the notice; with `notice`, only if that one is still the notice shown. */
+  hide(notice?: N): void {
+    if (!this.shown || (notice !== undefined && this.shown.notice !== notice)) return;
+    this.shown.notice.hide();
+    this.shown = null;
+  }
+
+  /** A file left the vault (trashed, deleted): its notice goes too. */
+  fileGone(path: string): void {
+    if (this.shown?.file.path === path) this.hide();
+  }
+
+  /** Hide the notice if its export was imported to the end, by the fingerprint test `done`. */
+  hideIfImported(done: (print: string) => boolean): void {
+    if (this.shown && done(this.shown.print)) this.hide();
+  }
+}
+
+/** What choosing an export to offer knows about a vault file before reading it (a TFile has all of it). */
+export interface ExportFileStat {
+  extension: string;
+  stat: { mtime: number; size: number };
+}
+
+/**
+ * At startup: the newest export that changed in the last `OFFER_WINDOW` and
+ * wasn't imported, or null. Files are sorted out by their modified time and
+ * size first, so only recent ones small enough to import are read (a zip is
+ * read whole), newest first, and reading stops at the first one to offer:
+ * a vault that keeps years of exports reads nothing more at launch.
+ * `limits`: the largest zip (`zipBytes`) and .md (`textBytes`) to read.
+ */
+export async function exportToOffer<F extends ExportFileStat>(
+  files: F[],
+  now: number,
+  limits: { zipBytes: number; textBytes: number },
+  read: (file: F) => Promise<string | null>,
+  wasImported: (text: string) => boolean,
+): Promise<F | null> {
+  const recent = files
+    .filter((f) => now - f.stat.mtime <= OFFER_WINDOW && f.stat.size <= (f.extension === "zip" ? limits.zipBytes : limits.textBytes))
+    .sort((a, b) => b.stat.mtime - a.stat.mtime);
+  for (const file of recent) {
+    const text = await read(file);
+    if (text !== null && !wasImported(text)) return file;
+  }
+  return null;
 }
 
 /** A short, stable fingerprint of an export's text (cyrb53), for spotting a repeat import. */

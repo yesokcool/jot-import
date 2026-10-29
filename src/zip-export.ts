@@ -15,7 +15,7 @@
 
 import { isJotExport } from "./format.ts";
 import { mediaRefs } from "./media.ts";
-import { canInflate, readZipDirectory, readZipEntry, ZIP_LIMITS, type ZipEntry, ZipError } from "./zip.ts";
+import { canInflate, readZipDirectory, readZipEntry, ZIP_LIMITS, type ZipEntry, ZipError, type ZipLimits } from "./zip.ts";
 
 export interface ZipExport {
   /** The export's Markdown. */
@@ -37,10 +37,11 @@ export interface ZipExport {
 /**
  * The export inside a zip, or a ZipError saying why there isn't one Jot
  * Import can use. Only the Markdown is unpacked here; the media is read
- * later, one file at a time, once the import is going ahead.
+ * later, one file at a time, once the import is going ahead. `limits`:
+ * the device's (`MOBILE_ZIP_LIMITS` on a phone or tablet).
  */
-export async function openZipExport(data: Uint8Array): Promise<ZipExport> {
-  const entries = readZipDirectory(data).filter((e) => !isMacMetadata(e.name));
+export async function openZipExport(data: Uint8Array, limits: ZipLimits = ZIP_LIMITS): Promise<ZipExport> {
+  const entries = readZipDirectory(data, limits).filter((e) => !isMacMetadata(e.name));
   // Said up front, rather than after some of the jots went in.
   if (entries.some((e) => e.method === 8) && !canInflate()) {
     throw new ZipError("This device can't unzip files. Unzip the export first, then import the .md file inside.");
@@ -50,7 +51,7 @@ export async function openZipExport(data: Uint8Array): Promise<ZipExport> {
     .sort((a, b) => depth(a.name) - depth(b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const decoder = new TextDecoder("utf-8");
   for (const entry of texts) {
-    if (entry.size > ZIP_LIMITS.textBytes) continue;
+    if (entry.size > limits.textBytes) continue;
     const text = decoder.decode(await readZipEntry(data, entry));
     if (!isJotExport(text)) continue;
 
@@ -65,7 +66,7 @@ export async function openZipExport(data: Uint8Array): Promise<ZipExport> {
       total += file.size;
       media.set(ref, file);
     }
-    if (total > ZIP_LIMITS.totalBytes) throw new ZipError("The export's attachments are too large to import together.");
+    if (total > limits.totalBytes) throw new ZipError("The export's attachments are too large to import together.");
     const onlyExport = entries.every((e) => e === entry || e.name.startsWith(`${folder}media/`));
     return { text, textPath: entry.name, media, onlyExport, read: (e) => readZipEntry(data, e) };
   }

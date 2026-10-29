@@ -32,3 +32,15 @@ test("one version everywhere: manifest, versions.json, package.json, package-loc
   assert.equal(lock.version, manifest.version);
   assert.equal(versions[manifest.version], manifest.minAppVersion);
 });
+
+test("versions.json lists released versions only, oldest first, up to the manifest's", () => {
+  // Obsidian reads it to pick a release an older app can run, so every key must be a published release.
+  const manifest = JSON.parse(read("manifest.json")) as { version: string };
+  const keys = Object.keys(JSON.parse(read("versions.json")) as Record<string, string>);
+  const parts = (v: string) => v.split(".").map(Number);
+  const order = (a: string, b: string) => parts(a).reduce((d, n, i) => d || n - parts(b)[i], 0);
+  assert.deepEqual([...keys].sort(order), keys, "oldest first");
+  assert.equal(keys[keys.length - 1], manifest.version, "ends at the manifest's version");
+  // 1.0.1 and 1.0.2 were version bumps that were never published as releases.
+  assert.ok(!keys.includes("1.0.1") && !keys.includes("1.0.2"));
+});

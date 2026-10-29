@@ -39,10 +39,15 @@ into `<vault>/.obsidian/plugins/jot-import/` and reload Obsidian.
 
 Since 1.1.0 a new install sends jots to a **note you choose** (the first
 import asks, with same-named notes already picked) and puts them at the
-**top**, below a `# Title` the note starts with (1.0 put them above it):
-Jot exports newest first, so each import lands above the last and a
-note reads newest first all the way down (at the bottom, each import's
-newest-first run follows the last one's, a zig-zag).
+**top**, below the note's `# Title` (1.0 put them above it; `isTitle` in
+`format.ts` says what counts as one, and why a `# ` heading an earlier
+import wrote doesn't). Each import lands above the last, so the latest
+import comes first. Inside an import the order is Jot's, not strictly
+newest first: its default sort is newest first, but jots with attachments
+are pinned first (on by default) and a category's tags group their jots
+after the untagged ones, so the note is newest first import by import,
+not jot by jot. At the bottom, each import follows the last one's (a
+zig-zag with the default sort).
 
 `data.json` holds only the settings the user set (`readSaved` /
 `dataToSave`), so a later change of default reaches everyone who never chose.
@@ -100,8 +105,10 @@ UTF-8 names without the UTF-8 flag, some decomposed (NFD).
   third-party code. Where it's missing, the import says so before writing
   anything. Refused: encrypted or split zips, a path with `..` or a leading
   `/` (zip slip; nothing is ever written by its zip path anyway), a zip over
-  1 GB, an entry over 512 MB, more than 1 GB unpacked in all, an entry that
-  unpacks past its stated size, a CRC mismatch.
+  1 GB, an entry over 512 MB, more than 1 GB unpacked in all (on a phone or
+  tablet, `Platform.isMobile`, half of each: `MOBILE_ZIP_LIMITS`), an entry
+  that unpacks past its stated size, a CRC mismatch. Each unpacked file is
+  its own exact-length buffer, handed to `createBinary` without a copy.
 - `zip-export.ts` finds the export's `.md` and the files its jots use.
 - `media.ts` finds and rewrites the links.
 - `runImport` saves each file for the note its jot goes to, with

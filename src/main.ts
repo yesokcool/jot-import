@@ -1,13 +1,14 @@
-import { App, Modal, Notice, Plugin, Setting, TFile, TFolder, debounce, getFrontMatterInfo, normalizePath, parseYaml } from "obsidian";
+import { App, Modal, Notice, Platform, Plugin, Setting, TFile, TFolder, debounce, getFrontMatterInfo, normalizePath, parseYaml } from "obsidian";
 import { dataToSave, DEFAULT_SETTINGS, HISTORY_LIMIT, type JotImportSettings, mergeState, type PluginState, readSaved } from "./data";
 import { isJotExport, isWholeExport, parseJotExport } from "./format";
 import {
+  exportToOffer,
   fingerprint,
   type ImportResult,
   type LinkChoice,
   type MediaSource,
-  OFFER_WINDOW,
   OfferedExports,
+  OfferNotice,
   planImport,
   type PriorImport,
   priorImport,
@@ -33,7 +34,7 @@ import {
   withoutLinkedId,
 } from "./routing";
 import { JotImportSettingTab } from "./settings";
-import { looksLikeZip, ZIP_LIMITS, ZipError } from "./zip";
+import { looksLikeZip, MOBILE_ZIP_LIMITS, wholeBuffer, ZIP_LIMITS, ZipError, type ZipLimits } from "./zip";
 import { openZipExport, type ZipExport } from "./zip-export";
 
 export default class JotImportPlugin extends Plugin {
@@ -58,10 +59,11 @@ export default class JotImportPlugin extends Plugin {
   private pendingLinks = new Map<string, Set<string>>();
   /**
    * The new-export notice last shown (one at a time), hidden when a newer
-   * export's takes its place, and on unload so its Import button can't run
-   * a disabled plugin.
+   * export's takes its place, when its file is gone or its export was
+   * imported another way, and on unload so its Import button can't run a
+   * disabled plugin.
    */
-  private offerNotice: Notice | null = null;
+  private offerNotice = new OfferNotice<Notice>();
 
   async onload() {
     await this.loadSettings();
@@ -105,7 +107,12 @@ export default class JotImportPlugin extends Plugin {
 
     // A file that's gone frees its path, so the next export saved there
     // (the same day's, by Jot's file names) is offered too.
-    this.registerEvent(this.app.vault.on("delete", (file) => this.offered.release(file.path)));
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        this.offered.release(file.path);
+        this.offerNotice.fileGone(file.path);
+      }),
+    );
 
     // The folder setting follows its folder when it's renamed or moved, so
     // the category notes aren't started again in a new, empty folder.
@@ -173,6 +180,8 @@ export default class JotImportPlugin extends Plugin {
     this.chosen = new Set(chosen);
     this.state = merged.state;
     if (merged.news) await this.saveSettings();
+    // Imported on another device: nothing left for the notice to do here.
+    this.offerNotice.hideIfImported((print) => priorImport(this.state.history, print).kind === "done");
   }
 
   /** Remember which notes hold links (the settings list reads them). */
@@ -231,8 +240,7 @@ export default class JotImportPlugin extends Plugin {
   }
 
   onunload() {
-    this.offerNotice?.hide();
-    this.offerNotice = null;
+    this.offerNotice.hide();
   }
 
   /** A link just written to a note, until Obsidian's index shows it. */
@@ -321,13 +329,15 @@ export default class JotImportPlugin extends Plugin {
 
   /** A vault zip's export, refusing one too large to read into memory. */
   private async openZip(file: TFile): Promise<ZipExport> {
-    if (file.stat.size > ZIP_LIMITS.zipBytes) throw new ZipError("The zip is too large to import.");
-    return openZipExport(new Uint8Array(await this.app.vault.readBinary(file)));
+    const limits = zipLimits();
+    if (file.stat.size > limits.zipBytes) throw new ZipError("The zip is too large to import.");
+    return openZipExport(new Uint8Array(await this.app.vault.readBinary(file)), limits);
   }
 
   /** Import a file picked from disk: a .md export, or a zipped one. Nothing is done to the file itself. */
   async importPickedFile(file: File): Promise<void> {
-    if (file.size > ZIP_LIMITS.zipBytes) {
+    const limits = zipLimits();
+    if (file.size > limits.zipBytes) {
       new Notice(`${file.name} is too large to import.`);
       return;
     }
@@ -338,7 +348,7 @@ export default class JotImportPlugin extends Plugin {
     }
     let zip: ZipExport;
     try {
-      zip = await openZipExport(bytes);
+      zip = await openZipExport(bytes, limits);
     } catch (e) {
       new Notice(zipProblem(file.name, e), 0);
       return;
@@ -449,6 +459,8 @@ export default class JotImportPlugin extends Plugin {
       new Notice(stoppedText(error, result), 0);
       return null;
     }
+    // Imported, by whatever route: a notice still offering this export goes.
+    this.offerNotice.hideIfImported((offered) => offered === print);
     new Notice(summaryText(result, plan.unlinkable, plan.ambiguous, skip, plan.besideExport), 8000);
     return result;
   }
@@ -459,16 +471,18 @@ export default class JotImportPlugin extends Plugin {
    * callers don't read each file again.
    */
   async candidateFiles(): Promise<Array<{ file: TFile; text: string }>> {
-    const byName = this.app.vault
-      .getFiles()
-      .filter((f) => isExportExtension(f) && looksLikeExportName(f))
-      .sort((a, b) => b.stat.mtime - a.stat.mtime);
+    const byName = this.exportFiles().sort((a, b) => b.stat.mtime - a.stat.mtime);
     const out: Array<{ file: TFile; text: string }> = [];
     for (const file of byName) {
       const text = await this.exportTextOf(file);
       if (text !== null) out.push({ file, text });
     }
     return out;
+  }
+
+  /** Vault files named like Jot exports (.md or .zip), not read yet. */
+  private exportFiles(): TFile[] {
+    return this.app.vault.getFiles().filter((f) => isExportExtension(f) && looksLikeExportName(f));
   }
 
   /** The export text in a vault file (a .md, or the one in a .zip), or null when it holds none Jot Import can read. */
@@ -507,15 +521,15 @@ export default class JotImportPlugin extends Plugin {
    */
   private async offerImport(file: TFile): Promise<void> {
     if (!this.settings.offerNewExports || !isExportExtension(file) || !looksLikeExportName(file)) return;
-    if (this.offered.has(file.path)) return;
+    // Checked before reading: an old or too-large file is never read to be offered.
+    if (!this.offered.mayClaim(file.path, file.stat.mtime, Date.now()) || file.stat.size > offerLimit(file)) return;
     const text = await this.exportTextOf(file);
     if (text === null || this.wasImported(text) || !this.offered.claim(file.path, file.stat.mtime, Date.now())) return;
 
-    // A newer export than the one offered before: its notice takes that one's place.
-    this.offerNotice?.hide();
+    // A newer export than the one offered before: its notice takes that one's place (`set`).
     const close = () => {
       notice.hide();
-      if (this.offerNotice === notice) this.offerNotice = null;
+      this.offerNotice.hide(notice);
     };
     const notice = new Notice(
       createFragment((f) => {
@@ -531,25 +545,36 @@ export default class JotImportPlugin extends Plugin {
       }),
       0,
     );
-    this.offerNotice = notice;
+    this.offerNotice.set(notice, file, fingerprint(text));
   }
 
-  /** At startup: offer the newest export that arrived in the last few days and wasn't imported. */
+  /** At startup: offer the newest export that arrived in the last few days and wasn't imported (only those are read). */
   private async offerRecentExports(): Promise<void> {
     if (!this.settings.offerNewExports) return;
-    const cutoff = Date.now() - OFFER_WINDOW;
-    const recent = (await this.candidateFiles()).filter(({ file }) => file.stat.mtime >= cutoff);
-    for (const { file, text } of recent) {
-      if (!this.wasImported(text)) {
-        await this.offerImport(file);
-        return;
-      }
-    }
+    const file = await exportToOffer(
+      this.exportFiles(),
+      Date.now(),
+      zipLimits(),
+      (f) => this.exportTextOf(f),
+      (text) => this.wasImported(text),
+    );
+    if (file) await this.offerImport(file);
   }
 }
 
 function looksLikeExportName(file: TFile): boolean {
   return /^jot-export/i.test(file.basename) || /jots$/i.test(file.basename);
+}
+
+/** The largest file the new-export notice reads to see whether it's an export: a zip Jot Import would import, or a .md as large as a zip's export may be. */
+function offerLimit(file: TFile): number {
+  const limits = zipLimits();
+  return file.extension === "zip" ? limits.zipBytes : limits.textBytes;
+}
+
+/** The zip limits for this device: lower on a phone or tablet. */
+function zipLimits(): ZipLimits {
+  return Platform.isMobile ? MOBILE_ZIP_LIMITS : ZIP_LIMITS;
 }
 
 /** A Markdown export, or a zipped one (Jot zips the export when it has photos or files). */
@@ -673,7 +698,7 @@ class ObsidianVault implements VaultPort {
         return { path: plain, created: false };
       }
     }
-    await this.app.vault.createBinary(path, data.slice().buffer);
+    await this.app.vault.createBinary(path, wholeBuffer(data));
     return { path, created: true };
   }
 

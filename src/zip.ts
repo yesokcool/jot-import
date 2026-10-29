@@ -9,8 +9,9 @@
  * Handles stored (0) and deflated (8) entries, data descriptors (Apple's
  * zips have sizes in the central directory only) and ZIP64 sizes. Refuses
  * encrypted and multi-disk zips, entries whose path could climb out of a
- * folder ("zip slip"), and anything bigger than `ZIP_LIMITS`. Pure: no
- * Obsidian imports, so the tests run it on real zips under Node.
+ * folder ("zip slip"), and anything bigger than the limits (`ZIP_LIMITS`, or
+ * `MOBILE_ZIP_LIMITS` on a phone or tablet). Pure: no Obsidian imports, so
+ * the tests run it on real zips under Node.
  */
 
 export interface ZipEntry {
@@ -28,16 +29,39 @@ export interface ZipEntry {
 /** A zip Jot Import won't read; `message` is one sentence for the notice. */
 export class ZipError extends Error {}
 
-export const ZIP_LIMITS = {
+export interface ZipLimits {
   /** The zip file itself. Larger ones aren't read into memory at all. */
-  zipBytes: 1024 * 1024 * 1024,
+  zipBytes: number;
   /** One entry, unpacked. */
-  entryBytes: 512 * 1024 * 1024,
+  entryBytes: number;
   /** All the entries an import unpacks, together. */
-  totalBytes: 1024 * 1024 * 1024,
+  totalBytes: number;
   /** The export's Markdown file, unpacked. */
-  textBytes: 32 * 1024 * 1024,
+  textBytes: number;
+  entries: number;
+}
+
+const MB = 1024 * 1024;
+
+/** On desktop. */
+export const ZIP_LIMITS: ZipLimits = {
+  zipBytes: 1024 * MB,
+  entryBytes: 512 * MB,
+  totalBytes: 1024 * MB,
+  textBytes: 32 * MB,
   entries: 10000,
+};
+
+/**
+ * On a phone or tablet, where the whole zip and the file being unpacked sit
+ * in a WebView's memory together: half as much. A larger export says so,
+ * with the same notice, before anything is written.
+ */
+export const MOBILE_ZIP_LIMITS: ZipLimits = {
+  ...ZIP_LIMITS,
+  zipBytes: 512 * MB,
+  entryBytes: 256 * MB,
+  totalBytes: 512 * MB,
 };
 
 const EOCD = 0x06054b50;
@@ -75,8 +99,8 @@ export function isSafeEntryName(name: string): boolean {
 }
 
 /** The central directory: every file entry (folders are left out), checked against the limits. */
-export function readZipDirectory(data: Uint8Array): ZipEntry[] {
-  if (data.length > ZIP_LIMITS.zipBytes) throw new ZipError("The zip is too large to import.");
+export function readZipDirectory(data: Uint8Array, limits: ZipLimits = ZIP_LIMITS): ZipEntry[] {
+  if (data.length > limits.zipBytes) throw new ZipError("The zip is too large to import.");
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const end = findEnd(view);
   if (end < 0) throw new ZipError("The zip is damaged or not a zip.");
@@ -92,7 +116,7 @@ export function readZipDirectory(data: Uint8Array): ZipEntry[] {
     size = z64.size;
     start = z64.start;
   }
-  if (count > ZIP_LIMITS.entries) throw new ZipError("The zip holds too many files to import.");
+  if (count > limits.entries) throw new ZipError("The zip holds too many files to import.");
   if (start + size > end) throw new ZipError("The zip is damaged or not a zip.");
 
   const decoder = new TextDecoder("utf-8");
@@ -128,7 +152,7 @@ export function readZipDirectory(data: Uint8Array): ZipEntry[] {
     if (name.endsWith("/")) continue;
     if (flags & 0x1) throw new ZipError("The zip is encrypted.");
     if (method !== 0 && method !== 8) throw new ZipError("The zip uses a compression Jot Import can't read.");
-    if (uncompressed > ZIP_LIMITS.entryBytes) throw new ZipError("A file in the zip is too large to import.");
+    if (uncompressed > limits.entryBytes) throw new ZipError("A file in the zip is too large to import.");
     if (method === 0 && compressedSize !== uncompressed) throw new ZipError("The zip is damaged or not a zip.");
     if (offset + 30 + compressedSize > start) throw new ZipError("The zip is damaged or not a zip.");
     entries.push({ name, method, compressedSize, size: uncompressed, crc, offset });
@@ -138,8 +162,9 @@ export function readZipDirectory(data: Uint8Array): ZipEntry[] {
 
 /**
  * One entry's bytes, inflated and checked against its size and CRC. Never
- * allocates more than the size the directory gave (already within
- * `ZIP_LIMITS.entryBytes`), and stops as soon as the data runs past it.
+ * allocates more than the size the directory gave (already within the
+ * limits' `entryBytes`), and stops as soon as the data runs past it. The
+ * array is always its own buffer, whole (see `wholeBuffer`).
  */
 export async function readZipEntry(data: Uint8Array, entry: ZipEntry): Promise<Uint8Array> {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -237,6 +262,17 @@ function readZip64Extra(
 function safeNumber(value: bigint): number {
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new ZipError("The zip is too large to import.");
   return Number(value);
+}
+
+/**
+ * The bytes as an ArrayBuffer (what Obsidian's `createBinary` takes),
+ * without a copy when the array already spans its whole buffer, as an entry
+ * from `readZipEntry` does; a view into a larger buffer is copied.
+ */
+export function wholeBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = bytes.buffer;
+  if (buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === buffer.byteLength) return buffer;
+  return bytes.slice().buffer;
 }
 
 let crcTable: Uint32Array | null = null;

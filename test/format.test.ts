@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { insertIntoNote, isJotExport, isWholeExport, noteNameFor, parseJotExport } from "../src/format.ts";
+import {
+  headingInputValue,
+  headingName,
+  headingSettingFor,
+  insertIntoNote,
+  isJotExport,
+  isWholeExport,
+  noteNameFor,
+  parseJotExport,
+} from "../src/format.ts";
 
 const SAMPLE = `<!-- jot:export v=1 date=2026-09-14T10:22:05Z -->
 Stats: 3 jots across 2 categories
@@ -228,6 +237,47 @@ test("top goes below the note's title, a # Title that comes first", () => {
   assert.equal(insertIntoNote("# Ideas\n\n- old\n", "- a", { position: "top", heading: "Ideas" }), "# Ideas\n\n- a\n\n- old\n");
 });
 
+test("top never puts earlier jots under a heading the jots wrote", () => {
+  // Jot's timestamp prefix "# " with group by date: each day's jots start with a # heading.
+  const day1 = "# Oct 28, 2026\n- gift for the neighbours\n\n- lamp for the hall";
+  const day2 = "# Oct 29, 2026\n- noodle place on Elm";
+  const day3 = "# Oct 30, 2026\n- book: The Overstory";
+  let note = insertIntoNote("", day1, top, "Ideas");
+  note = insertIntoNote(note, day2, top, "Ideas");
+  assert.equal(note, `${day2}\n\n${day1}\n`, "day 2 above day 1, each day with its own jots");
+  note = insertIntoNote(note, day3, top, "Ideas");
+  assert.equal(note, `${day3}\n\n${day2}\n\n${day1}\n`);
+  // Without the note's name, the same.
+  assert.equal(insertIntoNote(insertIntoNote("", day1, top), day2, top), `${day2}\n\n${day1}\n`);
+  // Under properties, the same.
+  assert.equal(insertIntoNote(`---\nid: x\n---\n${day1}\n`, day2, top, "Ideas"), `---\nid: x\n---\n${day2}\n\n${day1}\n`);
+  // A note an import with headings filled, then an import without them (the export settings changed).
+  assert.equal(
+    insertIntoNote(`${day2}\n\n${day1}\n`, "- loose idea", top, "Ideas"),
+    `- loose idea\n\n${day2}\n\n${day1}\n`,
+    "two # headings: neither is a title",
+  );
+  // A jot's own text with a # heading, and no prefix: the next import goes above it, not into it.
+  assert.equal(insertIntoNote("", "# Trip\nLisbon, Porto", top), "# Trip\nLisbon, Porto\n");
+  assert.equal(insertIntoNote("# Trip\nLisbon, Porto\n", "# Gifts\nscarf", top), "# Gifts\nscarf\n\n# Trip\nLisbon, Porto\n");
+});
+
+test("top keeps a # Title with the note's name first, even when the jots have # headings", () => {
+  const day = "# Oct 29, 2026\n- noodle place on Elm";
+  assert.equal(
+    insertIntoNote("# Ideas\n\n# Oct 28, 2026\n- lamp\n", day, top, "Ideas"),
+    `# Ideas\n\n${day}\n\n# Oct 28, 2026\n- lamp\n`,
+  );
+  assert.equal(insertIntoNote("# ideas\n", day, top, "Ideas"), `# ideas\n\n${day}\n`, "in any case");
+  assert.equal(insertIntoNote("# Work / Life\n- old\n", day, top, "Work - Life"), `# Work / Life\n\n${day}\n\n- old\n`, "or as its note name");
+  // A title with another text is kept only while it's the only # heading around.
+  assert.equal(insertIntoNote("# Gift list\n\n- scarf\n", "- lamp", top, "Gifts"), "# Gift list\n\n- lamp\n\n- scarf\n");
+  assert.equal(insertIntoNote("# Gift list\n\n- scarf\n", day, top, "Gifts"), `${day}\n\n# Gift list\n\n- scarf\n`);
+  // A # heading inside code doesn't count.
+  assert.equal(insertIntoNote("# Ideas\n\n```\n# not a heading\n```\n", "- a", top), "# Ideas\n\n- a\n\n```\n# not a heading\n```\n");
+  assert.equal(insertIntoNote("# Ideas\n", "- a\n```\n# not a heading\n```", top), "# Ideas\n\n- a\n```\n# not a heading\n```\n");
+});
+
 test("under a heading: end of that section, before the next heading", () => {
   const note = "# Ideas\n\n## Inbox\n\n- old\n\n## Done\n\n- done\n";
   assert.equal(
@@ -328,4 +378,94 @@ test("a note starting with a byte-order mark keeps its properties on top", () =>
 test("empty section under the heading", () => {
   assert.equal(insertIntoNote("## Inbox\n\n## Next\n", "- a", { position: "bottom", heading: "Inbox" }), "## Inbox\n\n- a\n\n## Next\n");
   assert.equal(insertIntoNote("## Inbox\n## Next\n", "- a", { position: "bottom", heading: "Inbox" }), "## Inbox\n\n- a\n\n## Next\n");
+});
+
+test("a picked heading whose text starts with # is that heading, not a level marker", () => {
+  // Obsidian's heading text for "## #1 picks" is "#1 picks"; the dialog's suggester offers it as is.
+  const note = "# Books\n\n## #1 picks\n- The Overstory\n\n## Later\n- x\n";
+  const headings = [
+    { heading: "Books", level: 1 },
+    { heading: "#1 picks", level: 2 },
+    { heading: "Later", level: 2 },
+  ];
+  const picked = headingSettingFor("#1 picks", headings);
+  assert.deepEqual(picked, { setting: "## #1 picks", name: "#1 picks", existing: true });
+  assert.equal(headingName(picked.setting), "#1 picks");
+  assert.equal(
+    insertIntoNote(note, "- Piranesi", { position: "top", heading: picked.setting }),
+    "# Books\n\n## #1 picks\n- Piranesi\n\n- The Overstory\n\n## Later\n- x\n",
+  );
+  assert.equal(
+    insertIntoNote(note, "- Piranesi", { position: "bottom", heading: picked.setting }),
+    "# Books\n\n## #1 picks\n- The Overstory\n\n- Piranesi\n\n## Later\n- x\n",
+  );
+  // A tag-like heading, in any case, at any level.
+  const tag = headingSettingFor("#Gifts", [{ heading: "#gifts", level: 3 }]);
+  assert.deepEqual(tag, { setting: "### #gifts", name: "#gifts", existing: true });
+  assert.equal(insertIntoNote("### #gifts\n- scarf\n", "- lamp", { position: "top", heading: tag.setting }), "### #gifts\n- lamp\n\n- scarf\n");
+  // The saved setting shows in the dialog as it is, so opening it again picks the same heading.
+  assert.equal(headingInputValue(picked.setting), "## #1 picks");
+  assert.deepEqual(headingSettingFor(headingInputValue(picked.setting), headings), { setting: "## #1 picks", name: "#1 picks", existing: true });
+});
+
+test("a typed heading: an existing one by its text, a new one with the level typed in front", () => {
+  const headings = [{ heading: "Inbox", level: 2 }];
+  assert.deepEqual(headingSettingFor("inbox", headings), { setting: "inbox", name: "inbox", existing: true });
+  assert.deepEqual(headingSettingFor("### Inbox", headings), { setting: "### Inbox", name: "Inbox", existing: true });
+  assert.deepEqual(headingSettingFor("### Places", headings), { setting: "### Places", name: "Places", existing: false });
+  assert.deepEqual(headingSettingFor("  ", headings), { setting: "", name: "", existing: false });
+  // Not a heading the note has: a leading # still sets the level, as before.
+  assert.deepEqual(headingSettingFor("#1 picks", []), { setting: "#1 picks", name: "1 picks", existing: false });
+  assert.equal(headingInputValue("### Inbox"), "Inbox");
+  assert.equal(headingInputValue("Inbox"), "Inbox");
+  assert.equal(headingInputValue(""), "");
+});
+
+test("setext headings, which Obsidian indexes, are found and end a section", () => {
+  const note = "Inbox\n=====\n\n- old\n\nOther\n=====\n- y\n";
+  assert.equal(
+    insertIntoNote(note, "- new", { position: "top", heading: "Inbox" }),
+    "Inbox\n=====\n\n- new\n\n- old\n\nOther\n=====\n- y\n",
+    "under the heading's underline, not a second ## Inbox at the end",
+  );
+  assert.equal(
+    insertIntoNote(note, "- new", { position: "bottom", heading: "Inbox" }),
+    "Inbox\n=====\n\n- old\n\n- new\n\nOther\n=====\n- y\n",
+    "the next setext heading of its level ends the section",
+  );
+  assert.equal(
+    insertIntoNote("Inbox\n-----\n- old\n\nOther\n-----\n- y\n", "- new", { position: "bottom", heading: "Inbox" }),
+    "Inbox\n-----\n- old\n\n- new\n\nOther\n-----\n- y\n",
+    "level 2, with dashes",
+  );
+  assert.equal(
+    insertIntoNote("## Inbox\n- old\n\nDone\n----\n- y\n", "- new", { position: "bottom", heading: "Inbox" }),
+    "## Inbox\n- old\n\n- new\n\nDone\n----\n- y\n",
+    "an ATX section ends at a setext heading of its level",
+  );
+  assert.equal(
+    insertIntoNote("# Ideas\n\nGifts\n---\n- scarf\n\n# Places\n", "- new", { position: "bottom", heading: "Ideas" }),
+    "# Ideas\n\nGifts\n---\n- scarf\n\n- new\n\n# Places\n",
+    "a deeper setext heading stays inside",
+  );
+  assert.equal(
+    insertIntoNote("---\ntags: x\n---\nInbox\n===\n- old\n", "- new", { position: "top", heading: "Inbox" }),
+    "---\ntags: x\n---\nInbox\n===\n- new\n\n- old\n",
+    "right below the properties",
+  );
+});
+
+test("lines that only look like setext headings are left alone", () => {
+  const under = { position: "bottom" as const, heading: "Inbox" };
+  // A list item over --- is a list and a rule; a line in a list item, a quote or a table isn't a heading of the note.
+  assert.equal(insertIntoNote("## Inbox\n- old\n\n- item\n---\n- y\n", "- new", under), "## Inbox\n- old\n\n- item\n---\n- y\n\n- new\n");
+  assert.equal(insertIntoNote("## Inbox\n- old\nlazy line\n---\n", "- new", under), "## Inbox\n- old\nlazy line\n---\n\n- new\n");
+  assert.equal(insertIntoNote("- a\n\n  Inbox\n  =====\n", "- new", under), "- a\n\n  Inbox\n  =====\n\n## Inbox\n\n- new\n");
+  assert.equal(insertIntoNote("> Inbox\n> ===\n", "- new", under), "> Inbox\n> ===\n\n## Inbox\n\n- new\n");
+  assert.equal(insertIntoNote("a | b\n---\n", "- new", { position: "bottom", heading: "a | b" }), "a | b\n---\n\n## a | b\n\n- new\n");
+  assert.equal(insertIntoNote("```\nInbox\n=====\n```\n", "- new", under), "```\nInbox\n=====\n```\n\n## Inbox\n\n- new\n");
+  assert.equal(insertIntoNote("---\nInbox: x\n---\nbody\n", "- new", under), "---\nInbox: x\n---\nbody\n\n## Inbox\n\n- new\n", "the properties' closing line");
+  // Obsidian's parser wants the underline alone on its line: indented or with trailing spaces, it's no heading.
+  assert.equal(insertIntoNote("Inbox\n  =====\n", "- new", under), "Inbox\n  =====\n\n## Inbox\n\n- new\n");
+  assert.equal(insertIntoNote("Inbox\n-----  \n- old\n", "- new", under), "Inbox\n-----  \n- old\n\n## Inbox\n\n- new\n");
 });

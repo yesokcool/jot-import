@@ -5,12 +5,14 @@ import { DEFAULT_SETTINGS } from "../src/data.ts";
 import { parseJotExport } from "../src/format.ts";
 import { openZipExport } from "../src/zip-export.ts";
 import {
+  exportToOffer,
   fingerprint,
   type ImportRecord,
   type ImportSettings,
   type LinkChoice,
   mergeHistories,
   OfferedExports,
+  OfferNotice,
   planImport,
   priorImport,
   recordImport,
@@ -501,6 +503,89 @@ test("only recent exports are offered, and one notice at a time, for the newest"
   assert.ok(!offered.claim("jot-export-2026-10-27.md", NOW - DAY, NOW));
 });
 
+test("at startup only recent exports are read, newest first, and reading stops at the one to offer", async () => {
+  const file = (name: string, age: number, size = 8000, extension = name.slice(name.lastIndexOf(".") + 1)) => ({
+    name,
+    extension,
+    stat: { mtime: NOW - age, size },
+  });
+  // Years of exports kept in the vault, every one of them a zip.
+  const old = Array.from({ length: 200 }, (_, i) => file(`jot-export-2025-${i}.zip`, (4 + i) * DAY));
+  const files = [
+    ...old,
+    file("jot-export-2026-10-26.zip", 2 * DAY),
+    file("jot-export-2026-10-27.md", DAY),
+    file("jot-export-2026-10-28.zip", 60 * 60 * 1000), // imported already
+    file("jot-export-huge.zip", 60 * 1000, 2 * 1024 * 1024 * 1024), // too large to import
+  ];
+  const limits = { zipBytes: 1024 * 1024 * 1024, textBytes: 32 * 1024 * 1024 };
+  const read: string[] = [];
+  const reader = async (f: { name: string }) => {
+    read.push(f.name);
+    return `export ${f.name}`;
+  };
+  const imported = (text: string) => text.endsWith("2026-10-28.zip");
+  const offered = await exportToOffer(files, NOW, limits, reader, imported);
+  assert.equal(offered?.name, "jot-export-2026-10-27.md");
+  assert.deepEqual(read, ["jot-export-2026-10-28.zip", "jot-export-2026-10-27.md"], "no old or too-large file is read");
+
+  read.length = 0;
+  assert.equal(await exportToOffer(old, NOW, limits, reader, () => false), null);
+  assert.deepEqual(read, [], "a vault of old exports reads nothing");
+
+  read.length = 0;
+  const notExports = await exportToOffer(files, NOW, limits, async (f) => (read.push(f.name), null), () => false);
+  assert.equal(notExports, null);
+  assert.equal(read.length, 3, "files that turn out not to be exports: the recent ones are read, still no old one");
+});
+
+test("an export is checked as offerable before it's read", () => {
+  const offered = new OfferedExports();
+  assert.ok(!offered.mayClaim("jot-export-2026-10-01.zip", NOW - 27 * DAY, NOW), "an old file isn't read for a notice");
+  assert.ok(offered.mayClaim("jot-export-2026-10-28.zip", NOW - 60 * 1000, NOW));
+  assert.ok(offered.mayClaim("jot-export-2026-10-28.zip", NOW - 60 * 1000, NOW), "asking claims nothing");
+  assert.ok(offered.claim("jot-export-2026-10-28.zip", NOW - 60 * 1000, NOW));
+  assert.ok(!offered.mayClaim("jot-export-2026-10-28.zip", NOW - 60 * 1000, NOW), "offered already");
+  assert.ok(!offered.mayClaim("jot-export-2026-10-27.zip", NOW - DAY, NOW), "older than the one offered");
+});
+
+test("the new-export notice goes once its file is gone or its export was imported another way", () => {
+  class FakeNotice {
+    hidden = false;
+    hide() {
+      this.hidden = true;
+    }
+  }
+  const notices = new OfferNotice<FakeNotice>();
+  const file = { path: "jot-export-2026-10-28-1540.md" };
+  const first = new FakeNotice();
+  notices.set(first, file, "print-a");
+  notices.fileGone("Ideas.md");
+  notices.hideIfImported((print) => print === "print-b");
+  assert.equal(first.hidden, false, "another file, another export: it stays");
+  notices.hideIfImported((print) => print === "print-a");
+  assert.equal(first.hidden, true, "imported by the command, the dialog, a picked file or another device");
+
+  const second = new FakeNotice();
+  notices.set(second, file, "print-b");
+  file.path = "Inbox/jot-export-2026-10-28-1540.md"; // moved: Obsidian's file object follows
+  notices.fileGone("jot-export-2026-10-28-1540.md");
+  assert.equal(second.hidden, false, "a move keeps it, Import still finds the file");
+  notices.fileGone("Inbox/jot-export-2026-10-28-1540.md");
+  assert.equal(second.hidden, true, "trashed or deleted");
+
+  // A newer export's notice takes the place of the one before; closing an old one leaves the new one.
+  const older = new FakeNotice();
+  const newer = new FakeNotice();
+  notices.set(older, { path: "a.md" }, "a");
+  notices.set(newer, { path: "b.md" }, "b");
+  assert.ok(older.hidden && !newer.hidden);
+  notices.hide(older);
+  assert.equal(newer.hidden, false);
+  notices.hide();
+  assert.equal(newer.hidden, true, "unload");
+});
+
 test("notices: one period after Obsidian's own messages, and long lists cut short", () => {
   const stopped = stoppedText({ path: "Jot/work.md", message: "File already exists." }, { notes: ["Work"], created: [], linked: [], attachments: 0 });
   assert.ok(stopped.startsWith("Jot Import stopped at Jot/work.md: File already exists. Already added to: Work."), stopped);
@@ -564,6 +649,27 @@ test("top, the default, keeps a note newest first across imports (bottom zig-zag
   );
 });
 
+test("top with jots that bring their own # headings: each day keeps its jots, a # Title stays first", async () => {
+  // Jot's timestamp prefix "# " with group by date.
+  const monday = exportText([{ name: "Ideas", body: "# Oct 27, 2026\n- lamp for the hall\n\n- scarf" }], "2026-10-27T20:00:00Z");
+  const tuesday = exportText([{ name: "Ideas", body: "# Oct 28, 2026\n- noodle place on Elm" }], "2026-10-28T20:00:00Z");
+  const settings: ImportSettings = { ...DEFAULT_SETTINGS, mode: "name" };
+
+  const created = new FakeVault();
+  await importWith(created, monday, settings);
+  await importWith(created, tuesday, settings);
+  assert.equal(created.files.get("Ideas.md"), "# Oct 28, 2026\n- noodle place on Elm\n\n# Oct 27, 2026\n- lamp for the hall\n\n- scarf\n");
+
+  // The note's own title, by its name, stays first.
+  const titled = new FakeVault({ "Ideas.md": "# Ideas\n" });
+  await importWith(titled, monday, settings);
+  await importWith(titled, tuesday, settings);
+  assert.equal(
+    titled.files.get("Ideas.md"),
+    "# Ideas\n\n# Oct 28, 2026\n- noodle place on Elm\n\n# Oct 27, 2026\n- lamp for the hall\n\n- scarf\n",
+  );
+});
+
 test("a category's own heading: chosen once, kept in the note, used by every later import", async () => {
   const vault = new FakeVault({ "Areas/Dev.md": "# Dev\n\n## Inbox\n\n- old\n\n## Archive\n" });
   const settings: ImportSettings = { ...LINKED, position: "top", heading: "" };
@@ -592,6 +698,16 @@ test("a category's own heading: chosen once, kept in the note, used by every lat
   const second = await importWith(vault, exportText([{ name: "DEV", id: DEV, body: "- b" }], "2026-10-30T09:00:00Z"), settings);
   assert.equal(second.plan.toLink.length, 0);
   assert.ok(vault.files.get("Areas/Dev.md")?.includes("## Inbox\n\n- b\n\n- a\n\n- old\n\n## Archive\n"));
+});
+
+test("a category's own heading whose text starts with # goes under that heading", async () => {
+  // Picked in the dialog from "## #1 picks": saved with its level, so the # isn't a level marker.
+  const vault = new FakeVault({
+    "Books.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n${HEADING_PROPERTY}:\n  ${DEV}: "## #1 picks"\n---\n## #1 picks\n- The Overstory\n\n## Later\n`,
+  });
+  const { error } = await importWith(vault, exportText([{ name: "Books", id: DEV, body: "- Piranesi" }]), { ...LINKED, position: "top" });
+  assert.equal(error, null);
+  assert.ok(vault.files.get("Books.md")?.endsWith("---\n## #1 picks\n- Piranesi\n\n- The Overstory\n\n## Later\n"), vault.files.get("Books.md"));
 });
 
 test("a category's heading overrides the Heading setting; no entry follows it", async () => {

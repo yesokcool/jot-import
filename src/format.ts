@@ -217,20 +217,20 @@ export interface InsertOptions {
 /**
  * Insert `chunk` into `existing` per the options and return the new note
  * text. The chunk is separated from its neighbours by one blank line.
- * "Top" means after frontmatter and after the note's title, a "# Title"
- * that is its first line of text (or right under the heading); "bottom"
- * means the end of the note (or the end of that heading's section). A
- * missing heading is appended at the end of the note first. A leading
- * byte-order mark is dropped (see `withoutBom`).
+ * "Top" means after frontmatter and after the note's title (see `isTitle`;
+ * `noteName` is the note's file name without ".md"), or right under the
+ * heading; "bottom" means the end of the note (or the end of that heading's
+ * section). A missing heading is appended at the end of the note first. A
+ * leading byte-order mark is dropped (see `withoutBom`).
  */
-export function insertIntoNote(existing: string, chunk: string, opts: InsertOptions): string {
+export function insertIntoNote(existing: string, chunk: string, opts: InsertOptions, noteName?: string): string {
   const text = withoutBom(existing).replace(/\r\n/g, "\n");
   const piece = closeFences(trimBlankLines(chunk.replace(/\r\n/g, "\n")));
   if (piece.length === 0) return text;
 
   const heading = parseHeadingSetting(opts.heading);
   if (!heading) {
-    return opts.position === "top" ? insertAtTop(text, piece) : appendAtBottom(text, piece);
+    return opts.position === "top" ? insertAtTop(text, piece, noteName) : appendAtBottom(text, piece);
   }
 
   const lines = text.length === 0 ? [] : text.split("\n");
@@ -244,12 +244,11 @@ export function insertIntoNote(existing: string, chunk: string, opts: InsertOpti
     return appendAtBottom(text, headingLine + "\n\n" + piece);
   }
 
-  const sectionStart = found.index + 1;
+  const sectionStart = found.end + 1;
   let sectionEnd = lines.length;
   for (let i = sectionStart; i < lines.length; i++) {
-    if (code[i]) continue;
-    const level = headingLevel(lines[i]);
-    if (level !== null && level <= found.level) {
+    const next = headingAt(lines, i, bodyStart, code);
+    if (next !== null && next.level <= found.level) {
       sectionEnd = i;
       break;
     }
@@ -303,23 +302,59 @@ function ensureTrailingNewline(s: string): string {
 function appendAtBottom(text: string, piece: string): string {
   // A note that is only frontmatter (a new linked note): go right under it.
   const fm = frontmatterLength(text);
-  if (fm > 0 && text.slice(fm).trim().length === 0) return insertAtTop(text, piece);
+  if (fm > 0 && text.slice(fm).trim().length === 0) return insertAtTop(text, piece, undefined);
   const body = text.replace(/\s+$/, "");
   return ensureTrailingNewline(body.length === 0 ? piece : body + "\n\n" + piece);
 }
 
-function insertAtTop(text: string, piece: string): string {
+function insertAtTop(text: string, piece: string, noteName: string | undefined): string {
   const fm = frontmatterLength(text);
   const front = text.slice(0, fm);
   const rest = trimBlankLines(text.slice(fm));
   // A note that opens with a "# Title" keeps it first: the jots go under
   // the title, not above it (since 1.1, when "top" became the default).
   const firstLine = rest.split("\n", 1)[0];
-  const title = headingLevel(firstLine) === 1 ? firstLine : null;
+  const title = isTitle(firstLine, rest, piece, noteName) ? firstLine : null;
   const after = title === null ? rest : trimBlankLines(rest.slice(firstLine.length));
   const below = after.length === 0 ? piece : piece + "\n\n" + after;
   const body = title === null ? below : title + "\n\n" + below;
   return ensureTrailingNewline(front.length === 0 ? body : front + "\n" + body);
+}
+
+/**
+ * Whether `line`, the first line of the note's `body` (below its
+ * properties), is the note's title, which "top" keeps first. It is when
+ * it's a `# ` heading and either
+ *
+ * - its text is the note's name ("# Ideas" in Ideas.md), or
+ * - it's the only `# ` heading around: the rest of the note has none, and
+ *   neither do the jots coming in.
+ *
+ * A jot can write `# ` headings itself: Jot's timestamp prefix set to "# ",
+ * with group by date, starts each day's jots with "# Oct 28, 2026" (or a
+ * jot's own text has one). When the jots coming in have such a heading, or
+ * the note has more than one, its first `# ` heading was most likely written
+ * by an earlier import, and going below it would put the new jots, and
+ * their own heading, between that heading and its jots. So then the jots
+ * go at the very top, unless the heading has the note's name.
+ */
+function isTitle(line: string, body: string, piece: string, noteName: string | undefined): boolean {
+  if (headingLevel(line) !== 1) return false;
+  if (noteName !== undefined && sameName(headingText(line), noteName)) return true;
+  return levelOneHeadings(body) === 1 && levelOneHeadings(piece) === 0;
+}
+
+/** How many `# ` headings the text has outside code. */
+function levelOneHeadings(text: string): number {
+  const lines = text.split("\n");
+  const { code } = codeLines(lines, 0);
+  return lines.filter((line, i) => !code[i] && headingLevel(line) === 1).length;
+}
+
+/** Whether a heading names the note: the same text, or the name its text would get as a note ("Work / Life" is Work - Life.md). */
+function sameName(heading: string, noteName: string): boolean {
+  const name = noteName.normalize("NFC").toLowerCase();
+  return heading.normalize("NFC").toLowerCase() === name || noteNameFor(heading).toLowerCase() === name;
 }
 
 /**
@@ -382,13 +417,40 @@ function headingText(line: string): string {
     .trim();
 }
 
-function findHeading(lines: string[], text: string, start: number, code: boolean[]): { index: number; level: number } | null {
+/**
+ * The heading that starts at line `i`, or null: outside code, from `start`
+ * (the first line below the properties) on, an ATX heading ("## Inbox") or
+ * a setext one ("Inbox" with a line of = or - right below, levels 1 and 2),
+ * which Obsidian indexes too. `end` is the heading's last line.
+ *
+ * Setext headings are only taken in their plain form, the one Obsidian
+ * always reads as a heading: a single unindented line of text, first in
+ * the note or after a blank line, that starts no other block (a list item,
+ * quote, table row, HTML, math or code). "- item" over "---" is a list and
+ * a rule, and a line inside a list item or quote isn't a heading of the
+ * note. Anything else is left as it was before: not a heading.
+ */
+function headingAt(lines: string[], i: number, start: number, code: boolean[]): { level: number; text: string; end: number } | null {
+  if (code[i]) return null;
+  const level = headingLevel(lines[i]);
+  if (level !== null) return { level, text: headingText(lines[i]), end: i };
+  // Obsidian's parser takes only an underline of = or - from the line's start to its end (no indent, no trailing space).
+  const underline = i + 1 < lines.length && !code[i + 1] ? /^(=+|-+)$/.exec(lines[i + 1]) : null;
+  if (!underline || (i > start && lines[i - 1].trim().length > 0 && !code[i - 1]) || !isPlainTextLine(lines[i])) return null;
+  return { level: underline[1][0] === "=" ? 1 : 2, text: lines[i].trim(), end: i + 1 };
+}
+
+/** An unindented line that starts a paragraph, not another kind of block. */
+function isPlainTextLine(line: string): boolean {
+  if (!/^\S/.test(line) || line.includes("|")) return false;
+  return !/^(?:#|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|>|<|`{3,}|~{3,}|[-=_*]+\s*$|\$\$|%%)/.test(line);
+}
+
+function findHeading(lines: string[], text: string, start: number, code: boolean[]): { index: number; level: number; end: number } | null {
   const wanted = text.toLowerCase();
   for (let i = start; i < lines.length; i++) {
-    if (code[i]) continue;
-    const level = headingLevel(lines[i]);
-    if (level === null) continue;
-    if (headingText(lines[i]).toLowerCase() === wanted) return { index: i, level };
+    const heading = headingAt(lines, i, start, code);
+    if (heading !== null && heading.text.toLowerCase() === wanted) return { index: i, level: heading.level, end: heading.end };
   }
   return null;
 }
@@ -396,6 +458,40 @@ function findHeading(lines: string[], text: string, start: number, code: boolean
 /** The heading a heading setting names, without the #s that set its level ("### Inbox" is "Inbox"); "" for none. */
 export function headingName(setting: string): string {
   return parseHeadingSetting(setting)?.text ?? "";
+}
+
+/**
+ * What a heading typed (or picked) in the dialog means, given the note's
+ * headings as Obsidian indexed them (their text, with no #s for the level).
+ * Text that is exactly one of them, case aside, is that heading, even when
+ * it starts with "#" ("#1 picks", from `## #1 picks`): its
+ * setting then has the level in front ("## #1 picks"), so the "#"
+ * isn't read as a level marker. Anything else is kept as typed, so
+ * "### Inbox" still sets the level of a heading that isn't there yet.
+ */
+export function headingSettingFor(
+  typed: string,
+  headings: Array<{ heading: string; level: number }>,
+): { setting: string; name: string; existing: boolean } {
+  const raw = typed.trim();
+  const exact = headings.find((h) => h.heading.trim().toLowerCase() === raw.toLowerCase());
+  if (raw.length > 0 && exact) {
+    const setting = raw.startsWith("#") ? `${"#".repeat(Math.min(Math.max(exact.level, 1), 6))} ${exact.heading.trim()}` : raw;
+    return { setting, name: headingName(setting), existing: true };
+  }
+  const name = headingName(raw);
+  const wanted = name.toLowerCase();
+  return { setting: raw, name, existing: name.length > 0 && headings.some((h) => h.heading.trim().toLowerCase() === wanted) };
+}
+
+/**
+ * The text to show in the dialog's Heading box for a saved setting: its
+ * heading without the level ("## Inbox" shows "Inbox"), unless that text
+ * would be read as another heading ("## #1 picks" shows as it is).
+ */
+export function headingInputValue(setting: string): string {
+  const name = headingName(setting);
+  return headingName(name) === name ? name : setting.trim();
 }
 
 function parseHeadingSetting(setting: string): { text: string; level: number } | null {

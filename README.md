@@ -15,8 +15,12 @@ your phone lands in the right places in your vault without any pasting.
    export lands in the vault, or run **Import a Jot export…** from the
    command palette (or the ribbon) and pick the file.
 
-Every category's jots are added to its note: at the top, so the newest are
-first (Jot exports newest first), at the bottom, or under a heading. Export
+Every category's jots are added to its note: at the top (the default), at
+the bottom, or under a heading. At the top, each import goes above the one
+before, so the latest import comes first. Within an import the jots keep
+Jot's export order: newest first by default, but jots with attachments come
+first when *Pin Jots with Attachments to Top* is on, a category's tags
+group their jots after the rest, and the sort is yours to change. Export
 files inside the vault go to the trash afterwards (there's a setting to keep
 them).
 
@@ -66,8 +70,8 @@ they always go by name.
 |---|---|
 | **Send jots to** | *Note you choose* (the default) or *Same-named note* (above). |
 | **Folder** | Where new notes are created (note you choose) or where the category notes live (same-named). Empty means the vault root. |
-| **Position** | Top (the default; after any properties, and below the note's title if it starts with a `# Title`) or bottom of the note, or of the heading's section. |
-| **Heading** | Optional. Put the jots under this heading instead. Added at the end of the note if missing. Type `### Inbox` to choose the level; `Inbox` alone creates `## Inbox`. A linked category's own heading takes its place. |
+| **Position** | Top (the default; after any properties, and below the note's `# Title`, see below) or bottom of the note, or of the heading's section. |
+| **Heading** | Optional. Put the jots under this heading instead. Added at the end of the note if missing. Type `### Inbox` to choose the level; `Inbox` alone creates `## Inbox`. A heading whose text starts with `#` needs its level in front here (`## #1 picks`); the dialog's Heading box finds it by its text. A linked category's own heading takes its place. |
 | **Trash export files after importing** | Only for export files inside the vault. Files chosen from disk are never touched. |
 | **Offer to import new exports** | Show a notice with an Import button when an export appears in the vault. |
 
@@ -76,6 +80,21 @@ timestamps, spacing, sort, tags), separated from what's around them by one
 blank line. Existing notes are matched case-insensitively. Category names
 with characters Obsidian can't use in file names are cleaned up (`Work /
 Life` becomes `Work - Life`).
+
+**The title.** "Top" keeps a note's `# Title` first: a first line that is
+a `# ` heading with the note's name (`# Ideas` in `Ideas.md`), or, with
+any other text, the only `# ` heading in the note and in the jots coming
+in.
+
+**Jots with headings of their own.** Jot can start jots with headings (a
+timestamp prefix of `# ` with group by date gives `# Oct 28, 2026` above
+each day's jots). With "top", each import goes above the last, so every
+heading keeps its own jots, and a first `# ` heading only stays first if
+it has the note's name: one an earlier import wrote is not a title. Under a
+heading, a jot heading at that heading's level or higher ends its section,
+as it does in Obsidian's outline, so "bottom" would put the next import
+before it. Choose "top", or a heading of a higher level than the jots'
+(`# Inbox` for `## ` jot headings).
 
 Importing the exact same file twice asks first, so an accidental second
 import doesn't double your jots.

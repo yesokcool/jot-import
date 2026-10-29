@@ -1,5 +1,5 @@
 import { AbstractInputSuggest, App, Modal, prepareFuzzySearch, Setting, setIcon, type TextComponent } from "obsidian";
-import { headingName, noteNameFor } from "./format";
+import { headingInputValue, headingName, headingSettingFor, noteNameFor } from "./format";
 import type { LinkChoice, LinkRequest } from "./importer";
 import { cleanFolder, fold, joinPath, type NoteInfo, resolveFolder } from "./routing";
 
@@ -243,7 +243,7 @@ export class DestinationModal extends Modal {
       .setDesc("Pick a heading in the note, or type a new one. Leave it empty to use the whole note.");
     headingSetting.addText((text) => {
       this.headingInput = text;
-      text.setValue(headingName(this.options.heading)).setPlaceholder("None");
+      text.setValue(headingInputValue(this.options.heading)).setPlaceholder("None");
       text.onChange(() => this.update());
       new HeadingSuggest(this.app, text.inputEl, () => (this.noteExists ? this.context.headingsOf(this.notePath) : []), (heading) => {
         text.setValue(heading);
@@ -294,17 +294,22 @@ export class DestinationModal extends Modal {
         if (this.doneButton) this.doneButton.disabled = false;
       }
     }
-    const heading = (this.headingInput?.getValue() ?? "").trim();
-    const name = headingName(heading);
+    const { name, existing } = this.headingChoice();
     if (!name) this.headingStatus?.setText("The jots go in the note itself, not under a heading.");
-    else if (this.noteExists && hasHeading(this.context.headingsOf(this.notePath), name)) this.headingStatus?.setText(`Existing heading: ${name}`);
+    else if (existing) this.headingStatus?.setText(`Existing heading: ${name}`);
     else this.headingStatus?.setText(`New heading: ${name}. It's added at the end of the note.`);
   }
 
+  /** The heading box's text as a heading setting, matched against the note's headings (see `headingSettingFor`). */
+  private headingChoice(): { setting: string; name: string; existing: boolean } {
+    const headings = this.noteExists ? this.context.headingsOf(this.notePath) : [];
+    return headingSettingFor(this.headingInput?.getValue() ?? "", headings);
+  }
+
   private submit() {
-    const typed = (this.headingInput?.getValue() ?? "").trim();
+    const { setting, name } = this.headingChoice();
     // The Heading setting's own value isn't saved per category, so changing the setting later still moves it.
-    const heading = headingName(typed) === headingName(this.context.heading) ? undefined : headingName(typed) ? typed : "";
+    const heading = name === headingName(this.context.heading) ? undefined : name ? setting : "";
     if (this.options.note) {
       const note = this.resolveNote();
       if ("problem" in note) return;

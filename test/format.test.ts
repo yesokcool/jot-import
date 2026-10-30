@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  fillMarker,
   headingInputValue,
   headingName,
   headingSettingFor,
@@ -64,6 +65,32 @@ test("attributes in any order; unknown ones and malformed ids are ignored", () =
     ],
     "an attribute a later Jot adds, in any spelling, doesn't hide its category",
   );
+});
+
+test("a category's workspace, escaped like its name, and none when the marker doesn't say", () => {
+  const text = [
+    "<!-- jot:export v=1 date=2026-11-02T09:00:00Z -->",
+    '<!-- jot:category name="Inbox" id="0D4C2A1B-1111-4A2B-9C3D-000000000001" workspace="Work" -->',
+    "- call back about the lease",
+    "<!-- /jot:category -->",
+    '<!-- jot:category name="Inbox" id="0D4C2A1B-1111-4A2B-9C3D-000000000002" workspace="June \\"&\\" Me \\u003e Home" -->',
+    "- seeds for the garden",
+    "<!-- /jot:category -->",
+    '<!-- jot:category name="Ideas" id="0D4C2A1B-1111-4A2B-9C3D-000000000003" -->',
+    "- a reading nook",
+    "<!-- /jot:category -->",
+    '<!-- jot:category name="Gifts" workspace="" -->',
+    "- a good umbrella",
+    "<!-- /jot:category -->",
+  ].join("\n");
+  const parsed = parseJotExport(text);
+  assert.equal(parsed?.problem, null);
+  assert.deepEqual(parsed?.blocks.map((b) => [b.name, b.workspace]), [
+    ["Inbox", "Work"],
+    ["Inbox", 'June "&" Me > Home'],
+    ["Ideas", null],
+    ["Gifts", null],
+  ]);
 });
 
 test("the header reads attributes in any order and ignores unknown ones", () => {
@@ -133,6 +160,28 @@ test("only a file that is the export alone counts as one to trash", () => {
   assert.equal(isWholeExport("<!-- jot:export v=1 -->\n"), false, "no categories at all");
 });
 
+test("text typed between blocks keeps the file; what Jot writes there doesn't", () => {
+  const block = (name: string) => `<!-- jot:category name="${name}" -->\n- ${name.toLowerCase()} jot\n<!-- /jot:category -->`;
+  const head = "<!-- jot:export v=1 date=2026-10-29T09:00:00Z -->\nStats: 3 jots across 3 categories\n\n";
+  // "Separate workspaces": each workspace's name above its blocks, as a heading or in capitals.
+  assert.ok(isWholeExport(`${head}## Work\n\n${block("Dev")}\n\n\n## Home\n\n${block("Garden")}\n\n\n${block("Uncategorized")}\n`));
+  assert.ok(isWholeExport(`${head}WORK\n\n${block("Dev")}\n\n\nHOME\n\n${block("Garden")}\n`));
+  assert.ok(isWholeExport(`${head}${block("Dev")}\r\n\r\n${block("Garden")}\r\n`), "CRLF");
+  assert.equal(isWholeExport(`${head}${block("Dev")}\n\nmy own notes on the garden\n\n${block("Garden")}\n`), false);
+  assert.equal(isWholeExport(`${head}${block("Dev")}\n\n## Work\nmy notes\n\n${block("Garden")}\n`), false, "a heading and more");
+  assert.equal(isWholeExport(`${head}${block("Dev")}\n\nStats: 1 jot\n\n${block("Garden")}\n`), false, "Stats only at the top");
+});
+
+test("only spaces and tabs are space inside a marker", () => {
+  const head = "<!-- jot:export v=1 -->\n";
+  // Jot escapes "<!--" before whitespace and "jot:", but not before U+FEFF, which JavaScript's \s matches.
+  const bom = parseJotExport(`${head}<!-- jot:category name="Dev" -->\n- see <!--\uFEFFjot:category name="X" --> here\n<!-- /jot:category -->\n`);
+  assert.equal(bom?.problem, null);
+  assert.equal(bom?.blocks[0].body, '- see <!--\uFEFFjot:category name="X" --> here');
+  const tabs = parseJotExport(`<!--\tjot:export\tv=1\t-->\n<!--\tjot:category\tname="Dev"\t-->\n- a\n<!--\t/jot:category\t-->\n`);
+  assert.deepEqual(tabs?.blocks.map((b) => b.name), ["Dev"]);
+});
+
 test("drops empty blocks", () => {
   const parsed = parseJotExport(`<!-- jot:export v=1 -->\n<!-- jot:category name="Empty" -->\n\n<!-- /jot:category -->\n`);
   assert.ok(parsed);
@@ -162,6 +211,9 @@ test("note names are never hidden, reserved, too long or in a second Unicode for
   assert.ok(!noteNameFor("word ".repeat(60)).endsWith(" "));
   // "é" typed as e + accent names the same note as "é".
   assert.equal(noteNameFor("Cafe\u0301"), "Caf\u00e9");
+  // Control characters are dropped; tabs and line breaks become spaces.
+  assert.equal(noteNameFor("Ideas\u0007\u0000 for\tJune\n"), "Ideas for June");
+  assert.equal(noteNameFor("\u0001\u001f"), "Unnamed category");
 });
 
 test("a name of symbols only gets its own readable note, never Untitled", () => {
@@ -208,28 +260,16 @@ test("top goes after frontmatter", () => {
   assert.equal(insertIntoNote("---\ntags: [x]\n---\n", "- a", top), "---\ntags: [x]\n---\n- a\n");
 });
 
-test("top goes below the note's title, a # Title that comes first", () => {
-  // Frontmatter and a title: under both.
-  assert.equal(
-    insertIntoNote("---\ntags: [x]\n---\n# Ideas\n\n- old\n", "- a", top),
-    "---\ntags: [x]\n---\n# Ideas\n\n- a\n\n- old\n",
-  );
-  // A title only, with blank lines around it or none.
-  assert.equal(insertIntoNote("# Ideas\n\n- old\n", "- a", top), "# Ideas\n\n- a\n\n- old\n");
-  assert.equal(insertIntoNote("\n\n# Ideas\n- old\n", "- a", top), "# Ideas\n\n- a\n\n- old\n");
-  assert.equal(insertIntoNote("# Ideas\n", "- a", top), "# Ideas\n\n- a\n");
-  assert.equal(insertIntoNote("# Ideas", "- a", top), "# Ideas\n\n- a\n");
-  // No title: the very top, above a first heading that isn't one.
+test("top with no heading is the very top of the note, # Title or not", () => {
+  // Pick the title as the heading to put jots under it.
+  assert.equal(insertIntoNote("---\ntags: [x]\n---\n# Ideas\n\n- old\n", "- a", top), "---\ntags: [x]\n---\n- a\n\n# Ideas\n\n- old\n");
+  assert.equal(insertIntoNote("# Ideas\n\n- old\n", "- a", top), "- a\n\n# Ideas\n\n- old\n");
+  assert.equal(insertIntoNote("\n\n# Ideas\n- old\n", "- a", top), "- a\n\n# Ideas\n- old\n");
+  assert.equal(insertIntoNote("# Ideas", "- a", top), "- a\n\n# Ideas\n");
   assert.equal(insertIntoNote("## Inbox\n\n- old\n", "- a", top), "- a\n\n## Inbox\n\n- old\n");
-  assert.equal(insertIntoNote("#tag\n- old\n", "- a", top), "- a\n\n#tag\n- old\n", "a tag, not a heading");
+  assert.equal(insertIntoNote("#tag\n- old\n", "- a", top), "- a\n\n#tag\n- old\n");
   assert.equal(insertIntoNote("```\n# not a title\n```\n", "- a", top), "- a\n\n```\n# not a title\n```\n");
-  // A title that isn't the first thing in the note: the very top.
-  assert.equal(insertIntoNote("Some intro\n\n# Ideas\n\n- old\n", "- a", top), "- a\n\nSome intro\n\n# Ideas\n\n- old\n");
-  assert.equal(
-    insertIntoNote("---\ntags: [x]\n---\n- old\n\n# Ideas\n", "- a", top),
-    "---\ntags: [x]\n---\n- a\n\n- old\n\n# Ideas\n",
-  );
-  // Under a chosen heading, nothing changes: right under that heading.
+  // Under a chosen heading: right under that heading, a # Title too.
   assert.equal(
     insertIntoNote("# Ideas\n\n## Inbox\n\n- old\n", "- a", { position: "top", heading: "Inbox" }),
     "# Ideas\n\n## Inbox\n\n- a\n\n- old\n",
@@ -237,45 +277,29 @@ test("top goes below the note's title, a # Title that comes first", () => {
   assert.equal(insertIntoNote("# Ideas\n\n- old\n", "- a", { position: "top", heading: "Ideas" }), "# Ideas\n\n- a\n\n- old\n");
 });
 
-test("top never puts earlier jots under a heading the jots wrote", () => {
+test("top never splits a jot from the text under its # heading", () => {
+  const off = { ...top, startMarker: "", endMarker: "" };
+  assert.equal(
+    insertIntoNote("# Lisbon\nPastéis at Manteigaria\n", "Book the train", off),
+    "Book the train\n\n# Lisbon\nPastéis at Manteigaria\n",
+  );
   // Jot's timestamp prefix "# " with group by date: each day's jots start with a # heading.
   const day1 = "# Oct 28, 2026\n- gift for the neighbours\n\n- lamp for the hall";
   const day2 = "# Oct 29, 2026\n- noodle place on Elm";
-  const day3 = "# Oct 30, 2026\n- book: The Overstory";
-  let note = insertIntoNote("", day1, top, "Ideas");
-  note = insertIntoNote(note, day2, top, "Ideas");
+  let note = insertIntoNote("", day1, top);
+  note = insertIntoNote(note, day2, top);
   assert.equal(note, `${day2}\n\n${day1}\n`, "day 2 above day 1, each day with its own jots");
-  note = insertIntoNote(note, day3, top, "Ideas");
-  assert.equal(note, `${day3}\n\n${day2}\n\n${day1}\n`);
-  // Without the note's name, the same.
-  assert.equal(insertIntoNote(insertIntoNote("", day1, top), day2, top), `${day2}\n\n${day1}\n`);
-  // Under properties, the same.
-  assert.equal(insertIntoNote(`---\nid: x\n---\n${day1}\n`, day2, top, "Ideas"), `---\nid: x\n---\n${day2}\n\n${day1}\n`);
-  // A note an import with headings filled, then an import without them (the export settings changed).
+  assert.equal(insertIntoNote(note, "- loose idea", top), `- loose idea\n\n${day2}\n\n${day1}\n`);
+  assert.equal(insertIntoNote(`---\nid: x\n---\n${day1}\n`, day2, top), `---\nid: x\n---\n${day2}\n\n${day1}\n`, "under properties");
+  // With start and end lines, each import stays whole too.
+  const day1Marked = { ...top, startMarker: "*Jots imported October 28, 2026*", endMarker: "---" };
+  const props = "---\njot-category-id:\n  - 0D4C2A1B-1111-4A2B-9C3D-000000000001\n---\n";
+  let marked = insertIntoNote(props, "# Trip\nLisbon, Porto", day1Marked);
+  marked = insertIntoNote(marked, "- lamp", { ...day1Marked, startMarker: "*Jots imported October 29, 2026*" });
   assert.equal(
-    insertIntoNote(`${day2}\n\n${day1}\n`, "- loose idea", top, "Ideas"),
-    `- loose idea\n\n${day2}\n\n${day1}\n`,
-    "two # headings: neither is a title",
+    marked,
+    `${props}*Jots imported October 29, 2026*\n\n- lamp\n\n---\n\n*Jots imported October 28, 2026*\n\n# Trip\nLisbon, Porto\n\n---\n`,
   );
-  // A jot's own text with a # heading, and no prefix: the next import goes above it, not into it.
-  assert.equal(insertIntoNote("", "# Trip\nLisbon, Porto", top), "# Trip\nLisbon, Porto\n");
-  assert.equal(insertIntoNote("# Trip\nLisbon, Porto\n", "# Gifts\nscarf", top), "# Gifts\nscarf\n\n# Trip\nLisbon, Porto\n");
-});
-
-test("top keeps a # Title with the note's name first, even when the jots have # headings", () => {
-  const day = "# Oct 29, 2026\n- noodle place on Elm";
-  assert.equal(
-    insertIntoNote("# Ideas\n\n# Oct 28, 2026\n- lamp\n", day, top, "Ideas"),
-    `# Ideas\n\n${day}\n\n# Oct 28, 2026\n- lamp\n`,
-  );
-  assert.equal(insertIntoNote("# ideas\n", day, top, "Ideas"), `# ideas\n\n${day}\n`, "in any case");
-  assert.equal(insertIntoNote("# Work / Life\n- old\n", day, top, "Work - Life"), `# Work / Life\n\n${day}\n\n- old\n`, "or as its note name");
-  // A title with another text is kept only while it's the only # heading around.
-  assert.equal(insertIntoNote("# Gift list\n\n- scarf\n", "- lamp", top, "Gifts"), "# Gift list\n\n- lamp\n\n- scarf\n");
-  assert.equal(insertIntoNote("# Gift list\n\n- scarf\n", day, top, "Gifts"), `${day}\n\n# Gift list\n\n- scarf\n`);
-  // A # heading inside code doesn't count.
-  assert.equal(insertIntoNote("# Ideas\n\n```\n# not a heading\n```\n", "- a", top), "# Ideas\n\n- a\n\n```\n# not a heading\n```\n");
-  assert.equal(insertIntoNote("# Ideas\n", "- a\n```\n# not a heading\n```", top), "# Ideas\n\n- a\n```\n# not a heading\n```\n");
 });
 
 test("under a heading: end of that section, before the next heading", () => {
@@ -303,9 +327,10 @@ test("missing heading is created at the end, honouring a typed level", () => {
   assert.equal(insertIntoNote("", "- a", { position: "bottom", heading: "### Inbox" }), "### Inbox\n\n- a\n");
 });
 
-test("a heading with no blank line after it stays tight", () => {
+test("under a heading with no blank line after it, the jots still get the blank lines asked for", () => {
   assert.equal(insertIntoNote("## Inbox\n- old\n", "- a", { position: "bottom", heading: "Inbox" }), "## Inbox\n- old\n\n- a\n");
-  assert.equal(insertIntoNote("## Inbox\n- old\n", "- a", { position: "top", heading: "Inbox" }), "## Inbox\n- a\n\n- old\n");
+  assert.equal(insertIntoNote("## Inbox\n- old\n", "- a", { position: "top", heading: "Inbox" }), "## Inbox\n\n- a\n\n- old\n");
+  assert.equal(insertIntoNote("## Inbox\n- old\n", "- a", { position: "top", heading: "Inbox", blankLinesBefore: 0 }), "## Inbox\n- a\n\n- old\n");
 });
 
 test("headings inside code fences are not matched", () => {
@@ -319,7 +344,7 @@ test("headings inside code fences are not matched", () => {
 test("a heading-like line in the properties is not the heading", () => {
   // A YAML comment that reads like the heading must not pull jots into the properties.
   const note = "---\n# Inbox\ntags: x\n---\n# Inbox\n- old\n";
-  assert.equal(insertIntoNote(note, "- a", { position: "top", heading: "Inbox" }), "---\n# Inbox\ntags: x\n---\n# Inbox\n- a\n\n- old\n");
+  assert.equal(insertIntoNote(note, "- a", { position: "top", heading: "Inbox" }), "---\n# Inbox\ntags: x\n---\n# Inbox\n\n- a\n\n- old\n");
   assert.equal(
     insertIntoNote("---\n# Inbox\n---\nbody\n", "- a", { position: "bottom", heading: "Inbox" }),
     "---\n# Inbox\n---\nbody\n\n## Inbox\n\n- a\n",
@@ -362,6 +387,15 @@ test("properties are what Obsidian reads as properties", () => {
   assert.equal(insertIntoNote("---\n---\nbody\n", "- a", top), "---\n---\n- a\n\nbody\n", "empty properties");
 });
 
+test("a note with Windows line endings keeps them", () => {
+  assert.equal(insertIntoNote("# Ideas\r\n\r\n- old\r\n", "- a\n- b", top), "- a\r\n- b\r\n\r\n# Ideas\r\n\r\n- old\r\n");
+  assert.equal(
+    insertIntoNote("---\r\ntags: x\r\n---\r\n## Inbox\r\n- old\r\n", "- a", { position: "bottom", heading: "Inbox" }),
+    "---\r\ntags: x\r\n---\r\n## Inbox\r\n- old\r\n\r\n- a\r\n",
+  );
+  assert.equal(insertIntoNote("- old\n", "- a\r\n- b", top), "- a\n- b\n\n- old\n", "jots take the note's endings");
+});
+
 test("a note starting with a byte-order mark keeps its properties on top", () => {
   // Some editors start a file with U+FEFF, and Obsidian hands it over as is.
   const note = "\uFEFF---\ntags: x\n---\n- old\n";
@@ -370,7 +404,7 @@ test("a note starting with a byte-order mark keeps its properties on top", () =>
   assert.equal(insertIntoNote("\uFEFF---\ntags: x\n---\n", "- a", bottom), "---\ntags: x\n---\n- a\n", "only properties");
   assert.equal(
     insertIntoNote("\uFEFF---\n# Inbox\n---\n# Inbox\n- old\n", "- a", { position: "top", heading: "Inbox" }),
-    "---\n# Inbox\n---\n# Inbox\n- a\n\n- old\n",
+    "---\n# Inbox\n---\n# Inbox\n\n- a\n\n- old\n",
     "the heading is looked for below the properties",
   );
 });
@@ -393,7 +427,7 @@ test("a picked heading whose text starts with # is that heading, not a level mar
   assert.equal(headingName(picked.setting), "#1 picks");
   assert.equal(
     insertIntoNote(note, "- Piranesi", { position: "top", heading: picked.setting }),
-    "# Books\n\n## #1 picks\n- Piranesi\n\n- The Overstory\n\n## Later\n- x\n",
+    "# Books\n\n## #1 picks\n\n- Piranesi\n\n- The Overstory\n\n## Later\n- x\n",
   );
   assert.equal(
     insertIntoNote(note, "- Piranesi", { position: "bottom", heading: picked.setting }),
@@ -402,7 +436,7 @@ test("a picked heading whose text starts with # is that heading, not a level mar
   // A tag-like heading, in any case, at any level.
   const tag = headingSettingFor("#Gifts", [{ heading: "#gifts", level: 3 }]);
   assert.deepEqual(tag, { setting: "### #gifts", name: "#gifts", existing: true });
-  assert.equal(insertIntoNote("### #gifts\n- scarf\n", "- lamp", { position: "top", heading: tag.setting }), "### #gifts\n- lamp\n\n- scarf\n");
+  assert.equal(insertIntoNote("### #gifts\n- scarf\n", "- lamp", { position: "top", heading: tag.setting }), "### #gifts\n\n- lamp\n\n- scarf\n");
   // The saved setting shows in the dialog as it is, so opening it again picks the same heading.
   assert.equal(headingInputValue(picked.setting), "## #1 picks");
   assert.deepEqual(headingSettingFor(headingInputValue(picked.setting), headings), { setting: "## #1 picks", name: "#1 picks", existing: true });
@@ -450,7 +484,7 @@ test("setext headings, which Obsidian indexes, are found and end a section", () 
   );
   assert.equal(
     insertIntoNote("---\ntags: x\n---\nInbox\n===\n- old\n", "- new", { position: "top", heading: "Inbox" }),
-    "---\ntags: x\n---\nInbox\n===\n- new\n\n- old\n",
+    "---\ntags: x\n---\nInbox\n===\n\n- new\n\n- old\n",
     "right below the properties",
   );
 });
@@ -468,4 +502,50 @@ test("lines that only look like setext headings are left alone", () => {
   // Obsidian's parser wants the underline alone on its line: indented or with trailing spaces, it's no heading.
   assert.equal(insertIntoNote("Inbox\n  =====\n", "- new", under), "Inbox\n  =====\n\n## Inbox\n\n- new\n");
   assert.equal(insertIntoNote("Inbox\n-----  \n- old\n", "- new", under), "Inbox\n-----  \n- old\n\n## Inbox\n\n- new\n");
+});
+
+test("a missing heading goes at the top of the note when asked, right after the properties", () => {
+  const opts = { position: "top" as const, heading: "Inbox", newHeading: "top" as const };
+  assert.equal(insertIntoNote("# Ideas\n\n- old\n", "- a", opts), "## Inbox\n\n- a\n\n# Ideas\n\n- old\n");
+  assert.equal(insertIntoNote("- old\n", "- a", opts), "## Inbox\n\n- a\n\n- old\n");
+  assert.equal(insertIntoNote("---\ntags: x\n---\n- old\n", "- a", opts), "---\ntags: x\n---\n## Inbox\n\n- a\n\n- old\n");
+  assert.equal(insertIntoNote("- old\n", "- a", { ...opts, newHeading: "bottom" }), "- old\n\n## Inbox\n\n- a\n", "bottom, the default");
+});
+
+test("the blank lines before and after the jots are the ones asked for", () => {
+  const spaced = { blankLinesBefore: 2, blankLinesAfter: 0 };
+  assert.equal(insertIntoNote("- old\n", "- a", { ...top, ...spaced }), "- a\n- old\n", "at the top, nothing is above");
+  assert.equal(insertIntoNote("- old\n", "- a", { ...bottom, ...spaced }), "- old\n\n\n- a\n");
+  assert.equal(insertIntoNote("", "- a", { ...top, ...spaced }), "- a\n", "nothing above or below: no blank lines");
+  const inbox = "## Inbox\n\n- old\n\n## Later\n";
+  assert.equal(insertIntoNote(inbox, "- a", { position: "top", heading: "Inbox", ...spaced }), "## Inbox\n\n\n- a\n- old\n\n## Later\n");
+  assert.equal(
+    insertIntoNote(inbox, "- a", { position: "bottom", heading: "Inbox", blankLinesBefore: 0, blankLinesAfter: 3 }),
+    "## Inbox\n\n- old\n- a\n\n\n\n## Later\n",
+  );
+});
+
+test("start and end lines go around the jots, a blank line away from them", () => {
+  const marked = { ...top, startMarker: "*Jots imported October 29, 2026*", endMarker: "---" };
+  assert.equal(
+    insertIntoNote("# Ideas\n\n- old\n", "- a", marked),
+    "*Jots imported October 29, 2026*\n\n- a\n\n---\n\n# Ideas\n\n- old\n",
+  );
+  assert.equal(insertIntoNote("", "plain text", { ...bottom, endMarker: "---" }), "plain text\n\n---\n", "a --- right under text would make it a heading");
+  assert.equal(insertIntoNote("", "- a", { ...bottom, startMarker: "  ", endMarker: "" }), "- a\n", "blank lines mean none");
+  assert.equal(insertIntoNote("", "", marked), "", "no jots, no lines");
+});
+
+test("a start line of --- never turns the note's top into properties", () => {
+  const ruled = { ...top, startMarker: "---", endMarker: "---" };
+  assert.equal(insertIntoNote("- old\n", "- a", ruled), "\n---\n\n- a\n\n---\n\n- old\n");
+  assert.equal(insertIntoNote("---\ntags: x\n---\n", "- a", ruled), "---\ntags: x\n---\n---\n\n- a\n\n---\n", "under real properties it's a rule");
+});
+
+test("start and end lines fill in the import's date and time", () => {
+  const format = (kind: "date" | "time", pattern: string | null) => `${kind}(${pattern ?? "default"})`;
+  assert.equal(fillMarker("*Jots imported {{date}}*", format), "*Jots imported date(default)*");
+  assert.equal(fillMarker("{{ DATE:YYYY-MM-DD }} at {{time}}", format), "date(YYYY-MM-DD) at time(default)");
+  assert.equal(fillMarker("one\ntwo ", format), "one two");
+  assert.equal(fillMarker("---", format), "---");
 });

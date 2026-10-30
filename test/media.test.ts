@@ -32,3 +32,24 @@ test("an image's alt text becomes the link's text only when it says something", 
   assert.equal(usefulAlt("300x200", "media/3F2A.png"), undefined);
   assert.equal(usefulAlt("a|b", "media/3F2A.png"), undefined);
 });
+
+test("a link ends where it names a file in the zip, so any extension Jot kept works", () => {
+  const zip = new Set(["media/A.tar gz", "media/B.we)ird", "media/C.a]b", "media/D.", "media/E.ünï"]);
+  const known = (ref: string) => zip.has(ref);
+  const text = "- [file: media/A.tar gz] ![b](media/B.we)ird) [video: media/C.a]b] ![d](media/D.) [file: media/E.ünï]";
+  assert.deepEqual(mediaRefs(text, known), [...zip]);
+  assert.equal(
+    rewriteMediaRefs(text, (ref) => `[[${ref.slice(6)}]]`, known),
+    "- [file: [[A.tar gz]]] ![[B.we)ird]] [video: [[C.a]b]]] ![[D.]] [file: [[E.ünï]]]",
+  );
+  // Without the zip's names, a link ends at its first ")" or "]".
+  assert.deepEqual(mediaRefs("![b](media/B.we)ird) [video: media/C.a]b]"), ["media/B.we", "media/C.a"]);
+  // A link to a file the zip doesn't have is left as Jot wrote it.
+  assert.equal(rewriteMediaRefs("![x](media/gone.jpg) text", (ref) => (zip.has(ref) ? "[[x]]" : null), known), "![x](media/gone.jpg) text");
+});
+
+test("a marker inside an image's alt text is part of the image", () => {
+  const text = "![see [file: media/A.pdf]](media/B.png)";
+  assert.deepEqual(mediaRefs(text), ["media/B.png"]);
+  assert.equal(rewriteMediaRefs(text, () => "[[B.png]]"), "![[B.png]]");
+});

@@ -21,6 +21,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22.x"
+      - name: Check the tag is the manifest version
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="$(node -p 'require("./manifest.json").version')"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag $tag isn't the version in manifest.json ($version)."
+            exit 1
+          fi
       - name: Build plugin
         run: |
           npm ci

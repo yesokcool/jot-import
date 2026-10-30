@@ -1,34 +1,17 @@
 /*
- * Where each category's jots go — pure functions over a snapshot of the
- * vault's notes, no Obsidian imports, so they can be unit-tested with Node.
- *
- * Two ways to route, picked in settings:
- *
- * - "name": the note named after the category, in the chosen folder
- *   (created if missing). Nothing to set up; renaming either side breaks it.
- * - "linked": the note whose `jot-category-id` property holds the category's
- *   id, anywhere in the vault. The first time a category shows up, the
- *   import asks which note it belongs to (the same-named note is picked for
- *   you) and writes the id into that note, so after that a note can be
- *   renamed or moved and the category renamed in Jot without anything
- *   breaking. A note can hold several ids to collect several categories.
- *
- * Suggestions are deterministic: the same vault and category always give the
- * same suggestion. No fuzzy scoring, no guessing beyond names.
+ * Where each category's jots go: the note whose `jot-category-id` holds its id, anywhere, so renames on either
+ * side don't break it, and the notes to suggest for a new one. An export with no ids goes by note name.
+ * Pure, deterministic functions over a snapshot of the vault's notes.
  */
 
 import { noteNameFor } from "./format.ts";
-
-export type RoutingMode = "name" | "linked";
 
 /** The frontmatter property that links a note to one or more Jot categories. */
 export const LINK_PROPERTY = "jot-category-id";
 
 /**
- * The frontmatter property that puts a linked category's jots under a
- * heading of its own: a map from category id to heading, beside the ids.
- * A category with no entry uses the Heading setting; "" means the note
- * itself, no heading.
+ * Frontmatter map from a linked category's id to its own heading in the note. A category with no entry
+ * uses the Heading setting; "" means no heading.
  */
 export const HEADING_PROPERTY = "jot-category-heading";
 
@@ -36,13 +19,11 @@ export const HEADING_PROPERTY = "jot-category-heading";
 export interface NoteInfo {
   /** Vault path, e.g. "Projects/Ideas.md". */
   path: string;
-  /** File name without ".md". */
   basename: string;
-  /** The note's `aliases` property, as strings. */
   aliases: string[];
-  /** Category ids in its `jot-category-id` property, upper-case. */
+  /** From `jot-category-id`, upper-case. */
   linkedIds: string[];
-  /** Its `jot-category-heading` property: heading by category id (upper-case). */
+  /** From `jot-category-heading`, by upper-case id. */
   headings?: Record<string, string>;
 }
 
@@ -62,7 +43,7 @@ export function linkedIdsFrom(frontmatter: unknown): string[] {
   return out;
 }
 
-/** The note's `aliases` property as strings (a single value or a list). */
+/** The note's `aliases` (or `alias`) property as strings, from a single value or a list. */
 export function aliasesFrom(frontmatter: unknown): string[] {
   if (!frontmatter || typeof frontmatter !== "object") return [];
   const fm = frontmatter as Record<string, unknown>;
@@ -71,17 +52,14 @@ export function aliasesFrom(frontmatter: unknown): string[] {
   return values.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
 }
 
-/**
- * The frontmatter value after adding `id`: always a list, so the property
- * keeps one type across the vault, existing ids kept in order.
- */
+/** The link property after adding `id`: always a list, so the property keeps one type across the vault. */
 export function withLinkedId(existing: unknown, id: string): string[] {
   const ids = linkedIdsFrom({ [LINK_PROPERTY]: existing });
   const upper = id.toUpperCase();
   return ids.includes(upper) ? ids : [...ids, upper];
 }
 
-/** The frontmatter value after removing `id`; null means delete the property. */
+/** The link property after removing `id`; null means delete the property. */
 export function withoutLinkedId(existing: unknown, id: string): string[] | null {
   const upper = id.toUpperCase();
   const ids = linkedIdsFrom({ [LINK_PROPERTY]: existing }).filter((x) => x !== upper);
@@ -96,17 +74,13 @@ export function headingsFrom(frontmatter: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     const id = key.trim().toUpperCase();
-    // null is what YAML makes of "id:" with nothing after it: the note itself.
+    // YAML reads "id:" with nothing after it as null, meaning no heading.
     if (UUID.test(id) && (typeof value === "string" || value === null)) out[id] = (value ?? "").trim();
   }
   return out;
 }
 
-/**
- * The `jot-category-heading` value after setting `id`'s heading (undefined
- * removes it, so the category uses the Heading setting again); null means
- * delete the property.
- */
+/** The heading map after setting `id`'s heading (undefined removes it); null means delete the property. */
 export function withHeading(existing: unknown, id: string, heading: string | undefined): Record<string, string> | null {
   const map = headingsFrom({ [HEADING_PROPERTY]: existing });
   const upper = id.toUpperCase();
@@ -116,11 +90,8 @@ export function withHeading(existing: unknown, id: string, heading: string | und
 }
 
 /**
- * The folder setting as a vault path, the way Obsidian's `normalizePath`
- * writes one: trimmed, one slash between folders, none at either end. The
- * vault's own paths are always in this form, so a setting typed as
- * "Inbox " or "A//B" would otherwise miss the notes already there and
- * create a second folder beside them.
+ * The folder setting as Obsidian's `normalizePath` would write it. Vault paths are always in this form,
+ * so "Inbox " or "A//B" would otherwise miss the existing folder and create a second one beside it.
  */
 export function cleanFolder(folder: string): string {
   return folder
@@ -131,26 +102,33 @@ export function cleanFolder(folder: string): string {
     .normalize("NFC");
 }
 
+/** Where a category's notes go: the folder, or a folder named after its workspace inside it. */
+export function workspaceFolder(folder: string, workspace: string | null): string {
+  if (workspace === null) return cleanFolder(folder);
+  const name = noteNameFor(workspace);
+  return cleanFolder(folder).length > 0 ? `${cleanFolder(folder)}/${name}` : name;
+}
+
 /** "Folder/Name.md", or "Name.md" at the vault root. */
 export function joinPath(folder: string, basename: string): string {
   const clean = cleanFolder(folder);
   return clean.length > 0 ? `${clean}/${basename}.md` : `${basename}.md`;
 }
 
-/**
- * A path as the disk compares it on macOS, iOS and Windows: case and
- * Unicode form don't count, so "Work.md" and "work.md" are one file there
- * and creating the second fails with "File already exists."
- */
+/** Whether `path` is in `folder` or a folder inside it ("" is the whole vault), the way the disk matches names. */
+export function isInFolder(path: string, folder: string): boolean {
+  const own = fold(cleanFolder(folder));
+  return own.length === 0 || fold(path).startsWith(own + "/");
+}
+
+/** A path as the disk compares it on macOS, iOS and Windows, where "Work.md" and "work.md" are one file. */
 export function fold(path: string): string {
   return path.normalize("NFC").toLowerCase();
 }
 
 /**
- * The folder setting spelled the way the vault spells it, level by level,
- * so "jot/inbox" means the existing "Jot/Inbox" rather than a second "jot"
- * folder the disk would refuse. A level that doesn't exist keeps its own
- * spelling. `folders` are the vault's folder paths.
+ * The folder setting spelled the way the vault spells it, so "jot/inbox" means the existing "Jot/Inbox"
+ * rather than a second folder the disk would refuse. A level that doesn't exist keeps its own spelling.
  */
 export function resolveFolder(folders: string[], folder: string): string {
   let current = "";
@@ -163,13 +141,44 @@ export function resolveFolder(folders: string[], folder: string): string {
   return current;
 }
 
+/** An exact match first, then one ignoring case and Unicode form, as the disk does. */
+export function findNote(notes: NoteInfo[], path: string): NoteInfo | undefined {
+  return notes.find((n) => n.path === path) ?? notes.find((n) => fold(n.path) === fold(path));
+}
+
+/**
+ * A note typed in the choose-note dialog, with a folder and a slash in front or in the Folder setting: an existing
+ * note, where a new one goes, or why it can't be used. `exclude` holds the export file.
+ */
+export function typedNote(
+  typed: string,
+  context: { notes: NoteInfo[]; folders: string[]; folder: string; exclude: Set<string> },
+): { path: string; exists: boolean } | { problem: string } {
+  const name = typed.trim().replace(/\.md$/i, "");
+  if (name.length === 0) return { problem: "Type a note name." };
+  const existing = findNote(context.notes, `${name}.md`);
+  if (existing) return { path: existing.path, exists: true };
+  const slash = name.lastIndexOf("/");
+  if (name.slice(slash + 1).trim().length === 0) return { problem: "Type a note name." };
+  // "..", "." and hidden folders like ".obsidian": outside the vault, or never shown.
+  const typedFolder = slash === -1 ? null : name.slice(0, slash);
+  if (typedFolder?.split(/[\\/]/).some((part) => part.trim().startsWith("."))) return { problem: "A folder name can't start with a dot." };
+  const folder = typedFolder === null ? context.folder : cleanFolder(typedFolder);
+  const path = joinPath(resolveFolder(context.folders, folder), noteNameFor(name.slice(slash + 1)));
+  if ([...context.exclude].some((p) => fold(p) === fold(path))) return { problem: "That's the export file. Choose another name." };
+  const cleaned = findNote(context.notes, path);
+  return cleaned ? { path: cleaned.path, exists: true } : { path, exists: false };
+}
+
 /** The folder setting after the folder `oldPath` became `newPath`, or null when the setting isn't in it. */
 export function movedFolder(setting: string, oldPath: string, newPath: string): string | null {
   const own = fold(setting);
   const old = fold(oldPath);
   if (own.length === 0) return null;
   if (own === old) return newPath;
-  return own.startsWith(old + "/") ? newPath + setting.normalize("NFC").slice(oldPath.normalize("NFC").length) : null;
+  if (!own.startsWith(old + "/")) return null;
+  // By folder, not by character: changing case can change a name's length ("İ" lower-cases to two).
+  return [newPath, ...setting.normalize("NFC").split("/").slice(oldPath.split("/").length)].join("/");
 }
 
 function parentOf(path: string): string {
@@ -186,16 +195,60 @@ function byPlace(a: NoteInfo, b: NoteInfo): number {
   return depth(a.path) - depth(b.path) || a.path.length - b.path.length || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 }
 
-/** Lower-case letters and digits only, so "Game Dev", "game-dev" and "GAMEDEV" compare equal. */
+/**
+ * Lower-case letters, digits, "+", "#" and "&" only, so "Game Dev", "game-dev" and "GAMEDEV" compare equal
+ * but "C", "C#" and "C++" don't.
+ */
 export function compact(s: string): string {
-  return s.normalize("NFKD").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  return s.normalize("NFKD").toLowerCase().replace(/[^\p{L}\p{N}+#&]+/gu, "");
 }
 
 function words(s: string): string[] {
   return s.normalize("NFKD").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 0);
 }
 
-/** Whether `needle`'s words appear in `hay`'s words, in order and next to each other. */
+interface NoteKeys {
+  path: string;
+  name: string;
+  aliases: string[];
+  words: string[];
+}
+
+/**
+ * A note's `fold`, `compact` and `words` keys, worked out once per note: routing and suggestions run once per
+ * category, over every note. The cache goes with the note list it was built from.
+ */
+const noteKeys = new WeakMap<NoteInfo, NoteKeys>();
+
+function keysOf(note: NoteInfo): NoteKeys {
+  let keys = noteKeys.get(note);
+  if (!keys) {
+    keys = { path: fold(note.path), name: compact(note.basename), aliases: note.aliases.map(compact), words: words(note.basename) };
+    noteKeys.set(note, keys);
+  }
+  return keys;
+}
+
+/** The notes with each word in their names. Built once per note list, which mustn't change after. */
+const wordIndex = new WeakMap<NoteInfo[], Map<string, NoteInfo[]>>();
+
+function notesWithWord(notes: NoteInfo[], word: string): NoteInfo[] {
+  let index = wordIndex.get(notes);
+  if (!index) {
+    index = new Map();
+    for (const note of notes) {
+      for (const w of new Set(keysOf(note).words)) {
+        const list = index.get(w);
+        if (list) list.push(note);
+        else index.set(w, [note]);
+      }
+    }
+    wordIndex.set(notes, index);
+  }
+  return index.get(word) ?? [];
+}
+
+/** Whether `needle` appears in `hay` as a run of consecutive words. */
 function containsWords(hay: string[], needle: string[]): boolean {
   if (needle.length === 0 || needle.length > hay.length) return false;
   for (let i = 0; i + needle.length <= hay.length; i++) {
@@ -204,15 +257,14 @@ function containsWords(hay: string[], needle: string[]): boolean {
   return false;
 }
 
-/** Where "name" routing sends a category: an existing note or a path to create. */
+/** The note named after a category in the folder: an existing note, or a path to create. */
 export function nameTarget(notes: NoteInfo[], folder: string, category: string): { path: string; exists: boolean } {
   const path = joinPath(folder, noteNameFor(category));
   if (notes.some((n) => n.path === path)) return { path, exists: true };
-  // The same path in another case or Unicode form: reuse that note rather
-  // than create a second one the disk would treat as the same file.
+  // Reuse a note at the same path in another case or Unicode form; the disk treats them as one file.
   const key = fold(path);
   const loose = notes
-    .filter((n) => fold(n.path) === key)
+    .filter((n) => keysOf(n).path === key)
     .map((n) => n.path)
     .sort()[0];
   return loose !== undefined ? { path: loose, exists: true } : { path, exists: false };
@@ -232,36 +284,30 @@ export interface LinkSuggestion {
 }
 
 /**
- * Suggest a note for a category that isn't linked yet. `pick` is a note
- * whose name or alias equals the category's (ignoring case, spaces and
- * punctuation) and that isn't already linked to another category; notes in
- * `folder` win ties, then shallower paths. `others` (at most `limit`) are
- * notes whose names contain the category's words, e.g. "Project Jot" for
- * "Jot". `exclude` drops paths that must never be targets (the export file).
+ * `pick`: an unlinked note whose name or alias equals the category's, ignoring case and punctuation, with
+ * notes in `folder` first, then shallower ones. `others`: up to 3 unlinked notes containing its words.
  */
 export function suggestNote(
   notes: NoteInfo[],
   category: string,
   folder: string,
-  options: { exclude?: Set<string>; limit?: number } = {},
+  options: { exclude?: Set<string> } = {},
 ): LinkSuggestion {
   const exclude = options.exclude ?? new Set<string>();
-  const limit = options.limit ?? 3;
   const key = compact(category);
   const needle = words(category);
   const home = cleanFolder(folder);
-  const candidates = notes.filter((n) => !exclude.has(n.path));
 
-  const sameName = candidates
-    .filter((n) => key.length > 0 && (compact(n.basename) === key || n.aliases.some((a) => compact(a) === key)))
+  const sameName = (key.length === 0 ? [] : notes)
+    .filter((n) => (keysOf(n).name === key || keysOf(n).aliases.includes(key)) && !exclude.has(n.path))
     .sort((a, b) => Number(parentOf(b.path) === home) - Number(parentOf(a.path) === home) || byPlace(a, b));
   const pick = sameName.find((n) => n.linkedIds.length === 0) ?? null;
 
-  // Notes already linked to a category aren't offered as one-tap choices
-  // (they stay reachable through the note search).
-  const others = candidates
-    .filter((n) => n !== pick && n.linkedIds.length === 0 && (sameName.includes(n) || containsWords(words(n.basename), needle)))
+  const similar = needle.length === 0 ? [] : notesWithWord(notes, needle[0]).filter((n) => containsWords(keysOf(n).words, needle));
+  // Linked notes aren't one-tap choices; they stay reachable through the note search.
+  const others = [...new Set([...sameName, ...similar])]
+    .filter((n) => n !== pick && n.linkedIds.length === 0 && !exclude.has(n.path))
     .sort((a, b) => a.basename.length - b.basename.length || byPlace(a, b))
-    .slice(0, limit);
+    .slice(0, 3);
   return { pick, others };
 }

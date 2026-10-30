@@ -8,12 +8,15 @@ import {
   compact,
   linkedIdsFrom,
   linkedNotes,
+  isInFolder,
   movedFolder,
   nameTarget,
   type NoteInfo,
   resolveFolder,
   suggestNote,
+  typedNote,
   withLinkedId,
+  workspaceFolder,
   withoutLinkedId,
 } from "../src/routing.ts";
 
@@ -86,6 +89,9 @@ test("the folder setting follows its folder when it's renamed or moved", () => {
   assert.equal(movedFolder("jot", "Jot", "jot"), "jot", "a case-only rename");
   assert.equal(movedFolder("Jot", "Jo", "X"), null, "a folder whose name only starts the same");
   assert.equal(movedFolder("", "Jot", "X"), null, "the vault root never moves");
+  // "İ" is one character and lower-cases to two; the rest of the setting must survive whole.
+  assert.equal(movedFolder("i\u0307/Inbox", "\u0130", "Archive"), "Archive/Inbox");
+  assert.equal(movedFolder("\u0130/Inbox/Old", "i\u0307", "Archive"), "Archive/Inbox/Old");
 });
 
 test("a folder setting with stray spaces or slashes still finds the notes in that folder", () => {
@@ -98,10 +104,15 @@ test("a folder setting with stray spaces or slashes still finds the notes in tha
   assert.equal(suggestNote(VAULT, "DEV", " Inbox/Old ").pick?.path, "Inbox/Old/dev.md", "the chosen folder still wins");
 });
 
-test("compact names ignore case, spaces and punctuation", () => {
+test("compact names ignore case, spaces and punctuation, but not +, # or &", () => {
   assert.equal(compact("Game Dev"), compact("GAMEDEV"));
   assert.equal(compact("SPANISH101"), compact("Spanish 101"));
   assert.equal(compact("Café"), "cafe");
+  assert.equal(new Set(["C", "C#", "C++"].map(compact)).size, 3);
+  assert.notEqual(compact("R&D"), compact("RD"));
+  assert.equal(suggestNote([note("C++.md"), note("C.md")], "C++", "").pick?.path, "C++.md");
+  assert.equal(suggestNote([note("C++.md")], "C", "").pick, null, "C++ isn't C");
+  assert.equal(suggestNote([note("Notes.md", { aliases: ["C#"] })], "C#", "").pick?.path, "Notes.md");
 });
 
 test("suggestions: the same-named note anywhere in the vault, preferring the folder", () => {
@@ -155,4 +166,52 @@ test("a note's per-category headings: read by id, set, cleared", () => {
   assert.deepEqual(withHeading({ [ID]: "Inbox", [OTHER]: "Later" }, ID, undefined), { [OTHER]: "Later" });
   assert.equal(withHeading({ [ID]: "Inbox" }, ID, undefined), null, "the last one removes the property");
   assert.deepEqual(withHeading({}, ID, ""), { [ID]: "" }, "the note itself, even when the Heading setting names one");
+});
+
+test("the exports folder: it and the folders in it, the whole vault for the root", () => {
+  assert.ok(isInFolder("Jots/jot-export-2026-10-29.md", "Jots"));
+  assert.ok(isInFolder("Jots/From phone/jot-export.zip", "Jots"));
+  assert.ok(isInFolder("jots/jot-export.md", "Jots"), "names match the way the disk does");
+  assert.ok(!isInFolder("Jots Archive/jot-export.md", "Jots"), "a folder whose name only starts the same");
+  assert.ok(!isInFolder("jot-export.md", "Jots"));
+  assert.ok(isInFolder("Anywhere/jot-export.md", ""));
+});
+
+test("suggestions in a big vault: each note's name is worked out once, not once per category", () => {
+  const notes = Array.from({ length: 20000 }, (_, i) => note(`Folder ${i % 50}/Note number ${i} café.md`, { aliases: i % 10 === 0 ? [`Alias ${i}`] : [] }));
+  notes.push(note("Areas/Category 7.md"), note("Areas/Old category 7 notes.md"));
+  const start = performance.now();
+  const all = Array.from({ length: 45 }, (_, i) => suggestNote(notes, `Category ${i}`, "Jots"));
+  assert.ok(performance.now() - start < 1500, `${Math.round(performance.now() - start)} ms`);
+  assert.equal(all[7].pick?.path, "Areas/Category 7.md");
+  assert.deepEqual(all[7].others.map((n) => n.path), ["Areas/Old category 7 notes.md"]);
+  assert.equal(all[8].pick, null);
+});
+
+test("a note typed in the dialog: an existing one, a new one in a folder, or why not", () => {
+  const context = {
+    notes: [note("Jot/Ideas.md"), note("Areas/Dev.md")],
+    folders: ["Jot", "Areas", "Projects"],
+    folder: "Jot",
+    exclude: new Set(["Jot/jot-export-2026-10-29-0910.md"]),
+  };
+  assert.deepEqual(typedNote("areas/dev", context), { path: "Areas/Dev.md", exists: true });
+  assert.deepEqual(typedNote("Ideas", context), { path: "Jot/Ideas.md", exists: true }, "in the Folder setting");
+  assert.deepEqual(typedNote("projects/Garden: ideas.md", context), { path: "Projects/Garden- ideas.md", exists: false });
+  assert.deepEqual(typedNote("Gifts", context), { path: "Jot/Gifts.md", exists: false });
+  for (const typed of ["../Gifts", "Jot/../../Gifts", "./Gifts", ".obsidian/plugins/Gifts", "Jot/.hidden/Gifts"]) {
+    assert.deepEqual(typedNote(typed, context), { problem: "A folder name can't start with a dot." }, typed);
+  }
+  assert.deepEqual(typedNote("jot-export-2026-10-29-0910", context), { problem: "That's the export file. Choose another name." });
+  assert.deepEqual(typedNote("Projects/", context), { problem: "Type a note name." });
+  assert.deepEqual(typedNote("  ", context), { problem: "Type a note name." });
+});
+
+test("a workspace's folder is inside the Folder, named like a note", () => {
+  assert.equal(workspaceFolder("Jots", "Work"), "Jots/Work");
+  assert.equal(workspaceFolder(" Jots/ ", "Home"), "Jots/Home");
+  assert.equal(workspaceFolder("", "Home"), "Home", "the vault root");
+  assert.equal(workspaceFolder("Jots", "Work / Side: projects?"), "Jots/Work - Side- projects");
+  assert.equal(workspaceFolder("Jots", ".hidden"), "Jots/hidden");
+  assert.equal(workspaceFolder("Jots", null), "Jots");
 });

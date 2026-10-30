@@ -1,29 +1,33 @@
-import { App, Modal, Notice, Platform, Plugin, Setting, TFile, TFolder, debounce, getFrontMatterInfo, normalizePath, parseYaml } from "obsidian";
-import { dataToSave, DEFAULT_SETTINGS, HISTORY_LIMIT, type JotImportSettings, mergeState, type PluginState, readSaved } from "./data";
-import { isJotExport, isWholeExport, parseJotExport } from "./format";
+import { App, Modal, moment, Notice, Platform, Plugin, Setting, TFile, TFolder, debounce, getFrontMatterInfo, normalizePath, parseYaml } from "obsidian";
+import { dataToSave, DEFAULT_SETTINGS, type JotImportSettings, mergeState, type PluginState, readSaved } from "./data.ts";
+import { fillMarker, isJotExport, isWholeExport, parseJotExport } from "./format.ts";
 import {
+  applyLinkMoves,
+  errorReason,
   exportToOffer,
   fingerprint,
+  HISTORY_LIMIT,
+  importExport,
   type ImportResult,
-  type LinkChoice,
-  type MediaSource,
+  linkedCategories,
+  linkMoves,
+  looksLikeExportName,
   OfferedExports,
   OfferNotice,
-  planImport,
   type PriorImport,
   priorImport,
   recordImport,
-  resolvePlan,
-  runImport,
+  saveDeduped,
   stoppedText,
   summaryText,
   type VaultPort,
-} from "./importer";
-import { type LinkContext, LinkModal } from "./link-modal";
+} from "./importer.ts";
+import { type LinkContext, LinkModal } from "./link-modal.ts";
 import {
   aliasesFrom,
   HEADING_PROPERTY,
   headingsFrom,
+  isInFolder,
   LINK_PROPERTY,
   linkedIdsFrom,
   movedFolder,
@@ -32,17 +36,17 @@ import {
   withHeading,
   withLinkedId,
   withoutLinkedId,
-} from "./routing";
-import { JotImportSettingTab } from "./settings";
-import { looksLikeZip, MOBILE_ZIP_LIMITS, wholeBuffer, ZIP_LIMITS, ZipError, type ZipLimits } from "./zip";
-import { openZipExport, type ZipExport } from "./zip-export";
+} from "./routing.ts";
+import { JotImportSettingTab } from "./settings.ts";
+import { looksLikeZip, MOBILE_ZIP_LIMITS, wholeBuffer, ZIP_LIMITS, ZipError, type ZipLimits } from "./zip.ts";
+import { openZipExport, type ZipExport, zipMedia } from "./zip-export.ts";
 
 export default class JotImportPlugin extends Plugin {
   settings: JotImportSettings = { ...DEFAULT_SETTINGS };
-  /** The settings the user set (or a 1.0 install saved); only these are saved, see `readSaved`. */
+  /** Setting keys the user chose. Only these are saved, so the rest follow the defaults. */
   private chosen = new Set<string>();
   private state: PluginState = { history: [], categoryNames: {} };
-  /** The export text in each zip looked at, by path, so listing exports doesn't unzip them again. */
+  /** Export text per zip path, so listing exports doesn't unzip them again. */
   private zipTexts = new Map<string, { stamp: string; text: string | null }>();
   /** Exports already offered this session, so a notice shows once per file. */
   private offered = new OfferedExports();
@@ -51,19 +55,12 @@ export default class JotImportPlugin extends Plugin {
   private settingTab: JotImportSettingTab | null = null;
   /** Notes that held a link at the last look, so removing one by hand refreshes the list too. */
   private linkedPaths = new Set<string>();
-  /**
-   * Links this plugin just wrote that Obsidian's index may not show yet, by
-   * note path. An import right after another reads them from here, so it
-   * doesn't ask about a category that was linked a moment ago.
-   */
+  /** Links just written that the metadata cache may not show yet, so the next import doesn't ask about them again. */
   private pendingLinks = new Map<string, Set<string>>();
-  /**
-   * The new-export notice last shown (one at a time), hidden when a newer
-   * export's takes its place, when its file is gone or its export was
-   * imported another way, and on unload so its Import button can't run a
-   * disabled plugin.
-   */
+  /** The one new-export notice shown. Hidden on unload so its Import button can't run a disabled plugin. */
   private offerNotice = new OfferNotice<Notice>();
+  /** A zip that's still arriving, by path: it's read once it stops changing. */
+  private settling = new Map<string, number>();
 
   async onload() {
     await this.loadSettings();
@@ -89,8 +86,7 @@ export default class JotImportPlugin extends Plugin {
     this.settingTab = new JotImportSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
 
-    // Keep the settings' "Linked notes" list current when a link is added
-    // or removed anywhere, including by hand in the properties panel.
+    // Refresh the "Linked notes" list when a link changes anywhere, including by hand.
     const refresh = debounce(() => this.settingTab?.update(), 500, true);
     this.registerEvent(
       this.app.metadataCache.on("changed", (file, _data, cache) => {
@@ -105,8 +101,7 @@ export default class JotImportPlugin extends Plugin {
       }),
     );
 
-    // A file that's gone frees its path, so the next export saved there
-    // (the same day's, by Jot's file names) is offered too.
+    // Jot names exports by day, so the next export may reuse a deleted one's path.
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         this.offered.release(file.path);
@@ -114,34 +109,34 @@ export default class JotImportPlugin extends Plugin {
       }),
     );
 
-    // The folder setting follows its folder when it's renamed or moved, so
-    // the category notes aren't started again in a new, empty folder.
+    // Folder settings follow a renamed folder, so new notes don't start over in an empty one.
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         this.offered.release(oldPath);
         if (!(file instanceof TFolder)) return;
         const folder = movedFolder(this.settings.folder, oldPath, file.path);
-        if (folder === null) return;
-        this.settings.folder = folder;
+        const exportsFolder = movedFolder(this.settings.exportsFolder, oldPath, file.path);
+        if (folder === null && exportsFolder === null) return;
+        if (folder !== null) this.settings.folder = folder;
+        if (exportsFolder !== null) this.settings.exportsFolder = exportsFolder;
         void this.saveSettings();
         this.settingTab?.update();
       }),
     );
 
-    // Registered after layout-ready so the vault's initial load doesn't
-    // count as new files; exports that arrived while Obsidian was closed
-    // are picked up by the one-time look below instead.
+    // After layout-ready, or the vault's initial load fires "create" for every file.
+    // Exports that arrived while Obsidian was closed are found by offerRecentExports.
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(
         this.app.vault.on("create", (file) => {
-          if (file instanceof TFile) void this.offerImport(file);
+          if (!(file instanceof TFile)) return;
+          if (file.extension === "zip") this.offerWhenSettled(file);
+          else void this.offerImport(file);
         }),
       );
-      // A zip still being copied in can't be read when it appears; it's
-      // offered once it's whole (the offer is still once per file).
       this.registerEvent(
         this.app.vault.on("modify", (file) => {
-          if (file instanceof TFile && file.extension === "zip") void this.offerImport(file);
+          if (file instanceof TFile && file.extension === "zip") this.offerWhenSettled(file);
         }),
       );
       void this.offerRecentExports();
@@ -160,18 +155,14 @@ export default class JotImportPlugin extends Plugin {
     await this.saveData(dataToSave(this.settings, this.chosen, this.state));
   }
 
-  /** The user set this setting: it's saved from now on, and no longer follows the default. */
+  /** Mark a setting as chosen, so it's saved and no longer follows the default. */
   chooseSetting(key: string) {
     this.chosen.add(key);
   }
 
   /**
-   * data.json changed on disk: another device's arrived by Obsidian Sync
-   * (or another program wrote it). Its settings replace this device's, so
-   * stale ones in memory can't revert them at the next save. The import
-   * histories are merged rather than replaced, so the repeat-import guard
-   * knows what every device imported; what only this device knew is saved
-   * back. Obsidian refreshes the settings tab afterwards.
+   * data.json changed on disk, usually by Obsidian Sync. Its settings win, but import
+   * histories are merged so the repeat-import guard knows what every device imported.
    */
   async onExternalSettingsChange() {
     const { settings, state, chosen } = readSaved(await this.loadData());
@@ -180,11 +171,11 @@ export default class JotImportPlugin extends Plugin {
     this.chosen = new Set(chosen);
     this.state = merged.state;
     if (merged.news) await this.saveSettings();
-    // Imported on another device: nothing left for the notice to do here.
+    // The offered export may have been imported on another device.
     this.offerNotice.hideIfImported((print) => priorImport(this.state.history, print).kind === "done");
+    this.settingTab?.update();
   }
 
-  /** Remember which notes hold links (the settings list reads them). */
   noteLinked(path: string, linked: boolean) {
     if (linked) this.linkedPaths.add(path);
     else this.linkedPaths.delete(path);
@@ -195,7 +186,6 @@ export default class JotImportPlugin extends Plugin {
     return this.state.categoryNames[id] ?? `Category ${id.slice(0, 8)}`;
   }
 
-  /** Remove one category's id (and its heading) from a note's properties. */
   async unlink(path: string, id: string): Promise<void> {
     const file = this.app.vault.getFileByPath(path);
     if (!file) return;
@@ -210,7 +200,7 @@ export default class JotImportPlugin extends Plugin {
     await indexed;
   }
 
-  /** Set a linked category's own heading in its note ("" for none; undefined: the Heading setting). */
+  /** `heading`: "" for none, undefined to follow the Heading setting. */
   async setCategoryHeading(path: string, id: string, heading: string | undefined): Promise<void> {
     const file = this.app.vault.getFileByPath(path);
     if (!file) return;
@@ -219,14 +209,46 @@ export default class JotImportPlugin extends Plugin {
     await indexed;
   }
 
-  /** The headings in a note, in order, as Obsidian indexed them. */
+  /** The settings' "Change where categories go": the dialog for every linked category, then only the links move. */
+  async changeLinks(): Promise<void> {
+    if (this.busy) {
+      new Notice("An import is running. Try again in a moment.");
+      return;
+    }
+    this.busy = true;
+    try {
+      const port = new ObsidianVault(this.app, this);
+      const notes = await port.notes();
+      const folders = this.app.vault.getAllFolders(false).map((f) => f.path);
+      const settings = { ...this.settings, folder: resolveFolder(folders, this.settings.folder), folders };
+      const requests = linkedCategories(
+        notes,
+        (id) => ({ name: this.categoryName(id), workspace: this.state.categoryWorkspaces?.[id] ?? null }),
+        settings,
+      );
+      if (requests.length === 0) return;
+      const choices = await LinkModal.ask(this.app, requests, this.linkContext(notes), { changeOnly: true });
+      if (!choices) return;
+      const moves = linkMoves(requests, choices);
+      if (moves.length === 0) return;
+      const { created } = await applyLinkMoves(moves, port);
+      const moved = moves.length === 1 ? "Changed where 1 category goes." : `Changed where ${moves.length} categories go.`;
+      new Notice(created.length > 0 ? `${moved} Created ${created.join(", ")}.` : moved);
+    } catch (e) {
+      new Notice(`Jot Import couldn't change the links: ${errorReason(e)}.`, 0);
+    } finally {
+      this.busy = false;
+      this.settingTab?.update();
+    }
+  }
+
   headingsOf(path: string): Array<{ heading: string; level: number }> {
     const file = this.app.vault.getFileByPath(path);
     const headings = file ? this.app.metadataCache.getFileCache(file)?.headings : undefined;
     return (headings ?? []).map((h) => ({ heading: h.heading, level: h.level }));
   }
 
-  /** What the "choose notes" dialogs need, with the export file at `exclude` left out. */
+  /** `exclude`: the export file itself, left out of the notes to choose from. */
   linkContext(notes: NoteInfo[], exclude: Set<string> = new Set()): LinkContext {
     const folders = this.app.vault.getAllFolders(false).map((f) => f.path);
     return {
@@ -234,6 +256,8 @@ export default class JotImportPlugin extends Plugin {
       folders,
       folder: resolveFolder(folders, this.settings.folder),
       heading: this.settings.heading,
+      shortenPaths: this.settings.shortenPaths,
+      newHeading: this.settings.newHeadingPosition,
       exclude,
       headingsOf: (path) => this.headingsOf(path),
     };
@@ -241,21 +265,29 @@ export default class JotImportPlugin extends Plugin {
 
   onunload() {
     this.offerNotice.hide();
+    for (const timer of this.settling.values()) window.clearTimeout(timer);
   }
 
-  /** A link just written to a note, until Obsidian's index shows it. */
+  /** A zip arriving in pieces changes many times and can't be read until it's whole. */
+  private offerWhenSettled(file: TFile) {
+    window.clearTimeout(this.settling.get(file.path));
+    const timer = window.setTimeout(() => {
+      this.settling.delete(file.path);
+      void this.offerImport(file);
+    }, 2000);
+    this.settling.set(file.path, timer);
+  }
+
   notePendingLink(path: string, id: string) {
     const ids = this.pendingLinks.get(path) ?? new Set<string>();
     ids.add(id.toUpperCase());
     this.pendingLinks.set(path, ids);
   }
 
-  /** The note's links as written but maybe not indexed yet. */
   pendingLinksOf(path: string): string[] {
     return [...(this.pendingLinks.get(path) ?? [])];
   }
 
-  /** Obsidian indexed the note: the links it shows are no longer pending. */
   private indexedLinks(path: string, ids: string[]) {
     const pending = this.pendingLinks.get(path);
     if (!pending) return;
@@ -263,7 +295,7 @@ export default class JotImportPlugin extends Plugin {
     if (pending.size === 0) this.pendingLinks.delete(path);
   }
 
-  /** Resolves once Obsidian has re-read the file's properties (or after a second), so a list built next sees the change. */
+  /** Resolves when the metadata cache re-reads the file (or after a second), so a list built next sees the change. */
   private metadataChange(file: TFile): Promise<void> {
     return new Promise((resolve) => {
       const ref = this.app.metadataCache.on("changed", (changed) => {
@@ -271,6 +303,7 @@ export default class JotImportPlugin extends Plugin {
         this.app.metadataCache.offref(ref);
         resolve();
       });
+      this.registerEvent(ref);
       window.setTimeout(() => {
         this.app.metadataCache.offref(ref);
         resolve();
@@ -278,8 +311,32 @@ export default class JotImportPlugin extends Plugin {
     });
   }
 
-  /** Import a file that lives inside the vault, then trash it if configured. */
   async importVaultFile(file: TFile): Promise<void> {
+    await this.guarded(() => this.importFromVault(file));
+  }
+
+  /** A file picked from disk is outside the vault, so it's never trashed. */
+  async importPickedFile(file: File): Promise<void> {
+    await this.guarded(() => this.importFromDisk(file));
+  }
+
+  /** `sourcePath`: the vault file the text is from, never written to. Null when nothing was written. */
+  async importText(text: string, sourcePath: string | null = null): Promise<ImportResult | null> {
+    const imported = await this.guarded(() => this.importOnce(text, { path: sourcePath, name: sourcePath ?? "the export" }));
+    return imported?.result ?? null;
+  }
+
+  /** A failure outside the write loop (reading the file, saving progress, trashing it) still gets a notice. */
+  private async guarded<T>(work: () => Promise<T>): Promise<T | null> {
+    try {
+      return await work();
+    } catch (e) {
+      new Notice(`Jot Import couldn't finish: ${errorReason(e)}. The export file was kept.`, 0);
+      return null;
+    }
+  }
+
+  private async importFromVault(file: TFile): Promise<void> {
     if (!this.app.vault.getFileByPath(file.path)) {
       new Notice(`${file.name} is gone. It may have been imported on another device.`);
       return;
@@ -290,11 +347,9 @@ export default class JotImportPlugin extends Plugin {
       new Notice(`${file.name} is not a Jot export.`);
       return;
     }
-    const result = await this.importText(text, file.path);
-    if (!result || !this.settings.trashAfterImport || !this.app.vault.getFileByPath(file.path)) return;
-    // Only the file exactly as imported, and only if it is the export alone:
-    // a note the export was pasted into, or a file replaced while the
-    // import ran, keeps its other text.
+    const imported = await this.importOnce(text, { path: file.path, name: file.path });
+    if (!imported || !this.settings.trashAfterImport || !this.app.vault.getFileByPath(file.path)) return;
+    // Trash only an unchanged file that holds nothing but the export.
     if (isWholeExport(text) && (await this.app.vault.read(file)) === text) {
       await this.app.fileManager.trashFile(file);
     } else {
@@ -302,12 +357,7 @@ export default class JotImportPlugin extends Plugin {
     }
   }
 
-  /**
-   * A zipped export in the vault (Jot shares one when the export has photos
-   * or files): the jots go in, the files they point at are saved where
-   * Obsidian saves attachments, and the zip goes to the trash like a .md
-   * export, if it's unchanged and holds only the export.
-   */
+  /** Like a .md export, the zip is trashed only if it's unchanged and holds nothing but the export, all of it imported. */
   private async importVaultZip(file: TFile): Promise<void> {
     const stamp = stampOf(file);
     let zip: ZipExport;
@@ -317,9 +367,10 @@ export default class JotImportPlugin extends Plugin {
       new Notice(zipProblem(file.name, e), 0);
       return;
     }
-    const result = await this.importText(zip.text, file.path, mediaOf(zip));
+    const imported = await this.importOnce(zip.text, { path: file.path, name: file.path, zip });
     const still = this.app.vault.getFileByPath(file.path);
-    if (!result || !this.settings.trashAfterImport || !still) return;
+    // With attachments left in it, the import's notice already says the zip was kept.
+    if (!imported || imported.attachmentsLeft > 0 || !this.settings.trashAfterImport || !still) return;
     if (zip.onlyExport && isWholeExport(zip.text) && stampOf(still) === stamp) {
       await this.app.fileManager.trashFile(still);
     } else {
@@ -327,15 +378,13 @@ export default class JotImportPlugin extends Plugin {
     }
   }
 
-  /** A vault zip's export, refusing one too large to read into memory. */
   private async openZip(file: TFile): Promise<ZipExport> {
     const limits = zipLimits();
     if (file.stat.size > limits.zipBytes) throw new ZipError("The zip is too large to import.");
     return openZipExport(new Uint8Array(await this.app.vault.readBinary(file)), limits);
   }
 
-  /** Import a file picked from disk: a .md export, or a zipped one. Nothing is done to the file itself. */
-  async importPickedFile(file: File): Promise<void> {
+  private async importFromDisk(file: File): Promise<void> {
     const limits = zipLimits();
     if (file.size > limits.zipBytes) {
       new Notice(`${file.name} is too large to import.`);
@@ -343,7 +392,7 @@ export default class JotImportPlugin extends Plugin {
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     if (!looksLikeZip(bytes)) {
-      await this.importText(new TextDecoder("utf-8").decode(bytes));
+      await this.importOnce(new TextDecoder("utf-8").decode(bytes), { path: null, name: file.name });
       return;
     }
     let zip: ZipExport;
@@ -353,28 +402,24 @@ export default class JotImportPlugin extends Plugin {
       new Notice(zipProblem(file.name, e), 0);
       return;
     }
-    await this.importText(zip.text, null, mediaOf(zip));
+    await this.importOnce(zip.text, { path: null, name: file.name, zip });
   }
 
-  /**
-   * Import export text from anywhere (a picked file, a vault file). Returns
-   * null when nothing was written (not an export, cancelled, or failed), so
-   * the caller keeps the file. `media`: a zipped export's attachments.
-   */
-  async importText(text: string, sourcePath: string | null = null, media?: MediaSource): Promise<ImportResult | null> {
+  /** Returns null when nothing was written (not an export, cancelled or failed), so the caller keeps the file. */
+  private async importOnce(text: string, origin: ExportOrigin): Promise<Imported | null> {
     if (this.busy) {
       new Notice("An import is already running. Try again in a moment.");
       return null;
     }
     this.busy = true;
     try {
-      return await this.runImport(text, sourcePath, media);
+      return await this.runImport(text, origin);
     } finally {
       this.busy = false;
     }
   }
 
-  private async runImport(text: string, sourcePath: string | null, media?: MediaSource): Promise<ImportResult | null> {
+  private async runImport(text: string, origin: ExportOrigin): Promise<Imported | null> {
     const parsed = parseJotExport(text);
     if (!parsed) {
       new Notice(
@@ -385,8 +430,7 @@ export default class JotImportPlugin extends Plugin {
       return null;
     }
     if (parsed.problem) {
-      // Importing anyway would leave out the jots the markers cut off, and
-      // then trash the only copy of them, so nothing is written.
+      // Importing anyway would drop the cut-off jots and then trash their only copy.
       new Notice(`Jot Import can't import this export without losing jots. ${parsed.problem} The file was kept.`, 0);
       return null;
     }
@@ -398,60 +442,52 @@ export default class JotImportPlugin extends Plugin {
     const print = fingerprint(text);
     const prior = priorImport(this.state.history, print);
     if (prior.kind === "done" && !(await confirmReimport(this.app, prior.at))) return null;
-    // An import of this file that stopped partway wrote its first blocks
-    // already: carry on after them rather than add them a second time.
-    const skip = prior.kind === "stopped" ? prior.written : 0;
-    const remaining = { ...parsed, blocks: parsed.blocks.slice(skip) };
 
     const port = new ObsidianVault(this.app, this);
     const notes = await port.notes();
-    const exclude = new Set(sourcePath ? [sourcePath] : []);
+    const exclude = new Set(origin.path !== null ? [origin.path] : []);
     const folders = this.app.vault.getAllFolders(false).map((f) => f.path);
-    const folder = resolveFolder(folders, this.settings.folder);
-    const plan = planImport(remaining, notes, { ...this.settings, folder }, exclude);
-
-    let choices = new Map<string, LinkChoice>();
-    if (plan.toLink.length > 0) {
-      const answered = await LinkModal.ask(this.app, plan.toLink, this.linkContext(notes, exclude));
-      if (!answered) return null;
-      choices = answered;
-    }
-
-    const writes = resolvePlan(plan, choices);
-    // How far this import got is saved before the first write and after
-    // each block but the last (the finished record follows right after),
-    // so an import cut off midway (Obsidian quit or killed, the plugin
-    // reloaded) resumes after what it wrote instead of adding it again. At
-    // worst the one block it was writing when it stopped goes in twice.
-    const previous = this.state.history.find((r) => r.fingerprint === print);
-    const saveProgress = async (written: number, notes: number) => {
-      const progress = { fingerprint: print, importedAt: Date.now(), notes, stoppedAfter: skip + written };
-      this.state.history = recordImport(this.state.history, progress, HISTORY_LIMIT);
-      await this.saveSettings();
-    };
-    await saveProgress(0, 0);
-    const { result, error, written } = await runImport(
-      writes,
+    // One time for the whole import, so every note's start line agrees.
+    const now = moment();
+    const fill = (template: string) => fillMarker(template, (kind, pattern) => now.format(pattern ?? (kind === "date" ? "LL" : "LT")));
+    const outcome = await importExport({
+      parsed,
+      print,
+      prior,
+      notes,
+      settings: { ...this.settings, folder: resolveFolder(folders, this.settings.folder), folders },
+      exclude,
+      ask: (plan) =>
+        LinkModal.ask(this.app, plan.toLink, this.linkContext(notes, exclude), {
+          linked: plan.linked,
+          collapseLinked: this.settings.collapseLinked,
+        }),
       port,
-      { position: this.settings.position, heading: this.settings.heading },
-      (count, sofar) => (count < writes.length ? saveProgress(count, sofar.notes.length) : Promise.resolve()),
-      media,
-    );
+      options: {
+        position: this.settings.position,
+        heading: this.settings.heading,
+        newHeading: this.settings.newHeadingPosition,
+        blankLinesBefore: this.settings.blankLinesBefore,
+        blankLinesAfter: this.settings.blankLinesAfter,
+        startMarker: fill(this.settings.startMarker),
+        endMarker: fill(this.settings.endMarker),
+      },
+      media: origin.zip ? zipMedia(origin.zip) : undefined,
+      progress: async (record) => {
+        this.state.history = recordImport(this.state.history, record, HISTORY_LIMIT);
+        await this.saveSettings();
+      },
+    });
+    if (!outcome) return null;
+    const { plan, result, error, resumed, unreadable, record } = outcome;
 
     for (const block of parsed.blocks) {
-      if (block.id) this.state.categoryNames[block.id] = block.name;
+      if (block.id === null) continue;
+      this.state.categoryNames[block.id] = block.name;
+      if (block.workspace !== null) this.state.categoryWorkspaces = { ...this.state.categoryWorkspaces, [block.id]: block.workspace };
+      else delete this.state.categoryWorkspaces?.[block.id];
     }
-    const record = { fingerprint: print, importedAt: Date.now(), notes: result.notes.length };
-    if (!error) {
-      this.state.history = recordImport(this.state.history, record, HISTORY_LIMIT);
-    } else if (skip + written > 0) {
-      this.state.history = recordImport(this.state.history, { ...record, stoppedAfter: skip + written }, HISTORY_LIMIT);
-    } else {
-      // Nothing went in: the history goes back to what it said before.
-      this.state.history = previous
-        ? recordImport(this.state.history, previous, HISTORY_LIMIT)
-        : this.state.history.filter((r) => r.fingerprint !== print);
-    }
+    if (record) this.state.history = recordImport(this.state.history, record, HISTORY_LIMIT);
     await this.saveSettings();
     this.settingTab?.update();
 
@@ -459,33 +495,41 @@ export default class JotImportPlugin extends Plugin {
       new Notice(stoppedText(error, result), 0);
       return null;
     }
-    // Imported, by whatever route: a notice still offering this export goes.
     this.offerNotice.hideIfImported((offered) => offered === print);
-    new Notice(summaryText(result, plan.unlinkable, plan.ambiguous, skip, plan.besideExport), 8000);
-    return result;
+    const left = (origin.zip?.unlinked ?? 0) + unreadable;
+    const summary = summaryText(result, { ...plan, resumed, left: { count: left, where: origin.name } });
+    new Notice(summary, left > 0 ? 0 : 8000);
+    return { result, attachmentsLeft: left };
   }
 
   /**
-   * Vault files that look like Jot exports (.md or .zip, by name, then by
-   * header), newest first, with the export text read to check the header so
-   * callers don't read each file again.
+   * Vault files that hold a Jot export, newest first, with their text so callers don't read them again. A zip
+   * older than `UNZIP_TO_LIST` is listed without its text: unzipping every one a vault keeps is slow on a phone.
    */
-  async candidateFiles(): Promise<Array<{ file: TFile; text: string }>> {
-    const byName = this.exportFiles().sort((a, b) => b.stat.mtime - a.stat.mtime);
-    const out: Array<{ file: TFile; text: string }> = [];
-    for (const file of byName) {
+  async candidateFiles(): Promise<Array<{ file: TFile; text: string | null }>> {
+    const now = Date.now();
+    const byDate = this.exportFiles().sort((a, b) => b.stat.mtime - a.stat.mtime);
+    const out: Array<{ file: TFile; text: string | null }> = [];
+    for (const file of byDate) {
+      if (file.extension === "zip" && now - file.stat.mtime > UNZIP_TO_LIST) {
+        out.push({ file, text: null });
+        continue;
+      }
       const text = await this.exportTextOf(file);
       if (text !== null) out.push({ file, text });
     }
     return out;
   }
 
-  /** Vault files named like Jot exports (.md or .zip), not read yet. */
-  private exportFiles(): TFile[] {
-    return this.app.vault.getFiles().filter((f) => isExportExtension(f) && looksLikeExportName(f));
+  /** Files the new-export notice may read. Nothing outside the exports folder is read unasked. */
+  private isWatched(file: TFile): boolean {
+    return isExportExtension(file) && looksLikeExportName(file.basename) && isInFolder(file.path, this.settings.exportsFolder);
   }
 
-  /** The export text in a vault file (a .md, or the one in a .zip), or null when it holds none Jot Import can read. */
+  private exportFiles(): TFile[] {
+    return this.app.vault.getFiles().filter((f) => isExportExtension(f) && looksLikeExportName(f.basename));
+  }
+
   private async exportTextOf(file: TFile): Promise<string | null> {
     if (file.extension !== "zip") {
       const text = await this.app.vault.cachedRead(file);
@@ -498,35 +542,28 @@ export default class JotImportPlugin extends Plugin {
     try {
       text = (await this.openZip(file)).text;
     } catch {
-      // Not an export Jot Import can read; importing it says why.
+      // Not a readable export; importing it shows why.
     }
     this.zipTexts.set(file.path, { stamp, text });
     return text;
   }
 
-  /** What the history says about this exact export text: new, imported, or stopped partway. */
   priorImport(text: string): PriorImport {
     return priorImport(this.state.history, fingerprint(text));
   }
 
-  /** Whether this exact export text was imported to the end before. */
   wasImported(text: string): boolean {
     return this.priorImport(text).kind === "done";
   }
 
-  /**
-   * A notice with an Import button for a new export in the vault: once per
-   * file per session, only for a recent export, one notice at a time (see
-   * `OfferedExports.claim`).
-   */
+  /** Offer a new export with an Import button (rules in `OfferedExports.claim`). It's never imported without asking. */
   private async offerImport(file: TFile): Promise<void> {
-    if (!this.settings.offerNewExports || !isExportExtension(file) || !looksLikeExportName(file)) return;
-    // Checked before reading: an old or too-large file is never read to be offered.
+    if (!this.settings.offerNewExports || !this.isWatched(file)) return;
+    // Checked before reading, so an old or too-large file is never read.
     if (!this.offered.mayClaim(file.path, file.stat.mtime, Date.now()) || file.stat.size > offerLimit(file)) return;
     const text = await this.exportTextOf(file);
     if (text === null || this.wasImported(text) || !this.offered.claim(file.path, file.stat.mtime, Date.now())) return;
 
-    // A newer export than the one offered before: its notice takes that one's place (`set`).
     const close = () => {
       notice.hide();
       this.offerNotice.hide(notice);
@@ -548,11 +585,11 @@ export default class JotImportPlugin extends Plugin {
     this.offerNotice.set(notice, file, fingerprint(text));
   }
 
-  /** At startup: offer the newest export that arrived in the last few days and wasn't imported (only those are read). */
+  /** At startup, offer the newest recent export that wasn't imported yet. */
   private async offerRecentExports(): Promise<void> {
     if (!this.settings.offerNewExports) return;
     const file = await exportToOffer(
-      this.exportFiles(),
+      this.exportFiles().filter((f) => this.isWatched(f)),
       Date.now(),
       zipLimits(),
       (f) => this.exportTextOf(f),
@@ -562,57 +599,55 @@ export default class JotImportPlugin extends Plugin {
   }
 }
 
-function looksLikeExportName(file: TFile): boolean {
-  return /^jot-export/i.test(file.basename) || /jots$/i.test(file.basename);
+/** Where an export came from: `path` in the vault (never written to), or null for a file picked from disk. */
+interface ExportOrigin {
+  path: string | null;
+  /** The vault path or the picked file's name, for the notices. */
+  name: string;
+  zip?: ZipExport;
 }
 
-/** The largest file the new-export notice reads to see whether it's an export: a zip Jot Import would import, or a .md as large as a zip's export may be. */
+interface Imported {
+  result: ImportResult;
+  /** Attachments in the zip that didn't reach the vault. */
+  attachmentsLeft: number;
+}
+
+/** The largest file the new-export notice reads. A .md may be as large as a zip's export text. */
 function offerLimit(file: TFile): number {
   const limits = zipLimits();
   return file.extension === "zip" ? limits.zipBytes : limits.textBytes;
 }
 
-/** The zip limits for this device: lower on a phone or tablet. */
+const UNZIP_TO_LIST = 30 * 24 * 60 * 60 * 1000;
+
+/** Lower limits on mobile, which has less memory. */
 function zipLimits(): ZipLimits {
   return Platform.isMobile ? MOBILE_ZIP_LIMITS : ZIP_LIMITS;
 }
 
-/** A Markdown export, or a zipped one (Jot zips the export when it has photos or files). */
+/** Jot zips an export when it has photos or files. */
 function isExportExtension(file: TFile): boolean {
   return file.extension === "md" || file.extension === "zip";
 }
 
-/** Size and modified time: whether a file changed between two looks at it. */
+/** Compared between two looks at a file to tell whether it changed. */
 function stampOf(file: TFile): string {
   return `${file.stat.size}:${file.stat.mtime}`;
 }
 
-/** A zipped export's attachments, for the importer. */
-function mediaOf(zip: ZipExport): MediaSource {
-  return {
-    has: (ref) => zip.media.has(ref),
-    read: (ref) => {
-      const entry = zip.media.get(ref);
-      if (!entry) throw new ZipError("The file isn't in the zip.");
-      return zip.read(entry);
-    },
-  };
-}
-
-/** The notice for a zip that can't be imported. */
 function zipProblem(name: string, e: unknown): string {
   const reason = e instanceof ZipError ? e.message : "It can't be read as a zip.";
   return `Jot Import can't import ${name}. ${reason}`;
 }
 
-/** Set (or with undefined, remove) one category's entry in a note's `jot-category-heading`. */
+/** Set one category's entry in the heading property; undefined removes it. */
 function setHeadingProperty(fm: Record<string, unknown>, id: string, heading: string | undefined) {
   const next = withHeading(fm[HEADING_PROPERTY], id, heading);
   if (next) fm[HEADING_PROPERTY] = next;
   else delete fm[HEADING_PROPERTY];
 }
 
-/** Ask before importing the same file a second time. */
 function confirmReimport(app: App, importedAt: number): Promise<boolean> {
   return new Promise((resolve) => {
     const modal = new Modal(app);
@@ -651,8 +686,7 @@ class ObsidianVault implements VaultPort {
     const out: NoteInfo[] = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
       const cache = this.app.metadataCache.getFileCache(file);
-      // Not indexed yet (right after startup): read the frontmatter
-      // directly, so a linked note is never mistaken for an unlinked one.
+      // Not indexed yet (right after startup): read the frontmatter so a linked note isn't missed.
       const fm: unknown = cache ? cache.frontmatter : await this.readFrontmatter(file);
       const linkedIds = [...new Set([...linkedIdsFrom(fm), ...this.plugin.pendingLinksOf(file.path)])];
       out.push({ path: file.path, basename: file.basename, aliases: aliasesFrom(fm), linkedIds, headings: headingsFrom(fm) });
@@ -684,22 +718,25 @@ class ObsidianVault implements VaultPort {
     this.plugin.notePendingLink(file.path, id);
   }
 
-  async saveAttachment(name: string, data: Uint8Array, notePath: string): Promise<{ path: string; created: boolean }> {
-    // Obsidian's own rule for where a pasted file goes (the vault root, a
-    // folder, beside the note, or a subfolder of it), deduped against what's
-    // there, with the folder created if missing.
-    const path = normalizePath(await this.app.fileManager.getAvailablePathForAttachment(safeFileName(name), normalizePath(notePath)));
-    // A deduped name means a file by the plain name is already there. The
-    // same bytes (this export imported before) are used rather than copied.
-    const plain = normalizePath(`${path.slice(0, path.lastIndexOf("/") + 1)}${safeFileName(name)}`);
-    if (plain !== path) {
-      const existing = this.app.vault.getFileByPath(plain);
-      if (existing && existing.stat.size === data.byteLength && sameBytes(new Uint8Array(await this.app.vault.readBinary(existing)), data)) {
-        return { path: plain, created: false };
-      }
-    }
-    await this.app.vault.createBinary(path, wholeBuffer(data));
-    return { path, created: true };
+  unlink(path: string, id: string): Promise<void> {
+    return this.plugin.unlink(normalizePath(path), id);
+  }
+
+  saveAttachment(name: string, data: Uint8Array, notePath: string): Promise<{ path: string; created: boolean }> {
+    const { vault, fileManager } = this.app;
+    return saveDeduped(
+      {
+        availablePath: async (file, note) => normalizePath(await fileManager.getAvailablePathForAttachment(file, normalizePath(note))),
+        size: (path) => vault.getFileByPath(normalizePath(path))?.stat.size ?? null,
+        read: async (path) => new Uint8Array(await vault.readBinary(this.file(path))),
+        write: async (path, bytes) => {
+          await vault.createBinary(normalizePath(path), wholeBuffer(bytes));
+        },
+      },
+      safeFileName(name),
+      data,
+      notePath,
+    );
   }
 
   linkTo(path: string, notePath: string, alias?: string): string {
@@ -724,7 +761,7 @@ class ObsidianVault implements VaultPort {
   }
 
   private async ensureFolder(folder: string): Promise<void> {
-    // Create each level so a nested folder that doesn't exist yet works.
+    // One level at a time, so a nested folder that doesn't exist yet works.
     let current = "";
     for (const part of folder.split("/")) {
       current = current ? `${current}/${part}` : part;
@@ -782,8 +819,8 @@ class ImportModal extends Modal {
     }
   }
 
-  /** A candidate's description: when it arrived, and whether it was imported or stopped partway. */
-  private importedNote(text: string, when: string): string {
+  private importedNote(text: string | null, when: string): string {
+    if (text === null) return when;
     const prior = this.plugin.priorImport(text);
     if (prior.kind === "done") return `${when}. Already imported.`;
     if (prior.kind === "stopped") return `${when}. Stopped partway; importing it again finishes it.`;
@@ -795,14 +832,8 @@ class ImportModal extends Modal {
   }
 }
 
-/** A file name Obsidian accepts: the characters it refuses become "-". */
+/** Characters Obsidian refuses in file names become "-". */
 function safeFileName(name: string): string {
   const cleaned = name.replace(/[\\/:*?"<>|#^[\]]/g, "-").replace(/^\.+/, "");
   return cleaned.length > 0 ? cleaned : "attachment";
-}
-
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
 }

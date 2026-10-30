@@ -3,13 +3,23 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DEFAULT_SETTINGS } from "../src/data.ts";
 import { parseJotExport } from "../src/format.ts";
-import { openZipExport } from "../src/zip-export.ts";
+import { openZipExport, zipMedia } from "../src/zip-export.ts";
+import { buildZip } from "./zip-builder.ts";
 import {
+  applyLinkMoves,
+  changesLink,
+  errorReason,
   exportToOffer,
   fingerprint,
+  HISTORY_LIMIT,
+  importExport,
   type ImportRecord,
+  looksLikeExportName,
   type ImportSettings,
   type LinkChoice,
+  linkedCategories,
+  linkMoves,
+  type MediaSource,
   mergeHistories,
   OfferedExports,
   OfferNotice,
@@ -18,11 +28,13 @@ import {
   recordImport,
   resolvePlan,
   runImport,
+  saveDeduped,
+  startingChoice,
   stoppedText,
   summaryText,
   type VaultPort,
 } from "../src/importer.ts";
-import { HEADING_PROPERTY, headingsFrom, LINK_PROPERTY, linkedIdsFrom, type NoteInfo, withHeading, withLinkedId } from "../src/routing.ts";
+import { HEADING_PROPERTY, headingsFrom, LINK_PROPERTY, linkedIdsFrom, type NoteInfo, withHeading, withLinkedId, withoutLinkedId } from "../src/routing.ts";
 
 const DEV = "0D4C2A1B-1111-4A2B-9C3D-000000000001";
 const JOT = "0D4C2A1B-1111-4A2B-9C3D-000000000002";
@@ -40,6 +52,8 @@ class FakeVault implements VaultPort {
   files = new Map<string, string>();
   binaries = new Map<string, Uint8Array>();
   failOn: string | null = null;
+  /** A write to this path never finishes. */
+  hangOn: string | null = null;
 
   constructor(files: Record<string, string> = {}) {
     for (const [path, text] of Object.entries(files)) this.files.set(path, text);
@@ -58,18 +72,26 @@ class FakeVault implements VaultPort {
     return this.files.has(path) || this.binaries.has(path);
   }
 
-  async saveAttachment(name: string, data: Uint8Array, notePath: string) {
-    const folder = notePath.includes("/") ? `${notePath.slice(0, notePath.lastIndexOf("/"))}/attachments` : "attachments";
-    const dot = name.lastIndexOf(".");
-    let path = `${folder}/${name}`;
-    for (let n = 1; this.exists(path); n++) path = `${folder}/${name.slice(0, dot)} ${n}${name.slice(dot)}`;
-    const plain = `${folder}/${name}`;
-    const existing = this.binaries.get(plain);
-    if (path !== plain && existing && existing.length === data.length && existing.every((b, i) => b === data[i])) {
-      return { path: plain, created: false };
-    }
-    this.binaries.set(path, data);
-    return { path, created: true };
+  saveAttachment(name: string, data: Uint8Array, notePath: string) {
+    return saveDeduped(
+      {
+        availablePath: async (file, note) => {
+          const folder = note.includes("/") ? `${note.slice(0, note.lastIndexOf("/"))}/attachments` : "attachments";
+          const dot = file.lastIndexOf(".");
+          let path = `${folder}/${file}`;
+          for (let n = 1; this.exists(path); n++) path = `${folder}/${file.slice(0, dot)} ${n}${file.slice(dot)}`;
+          return path;
+        },
+        size: (path) => this.binaries.get(path)?.length ?? null,
+        read: async (path) => this.binaries.get(path) ?? new Uint8Array(),
+        write: async (path, bytes) => {
+          this.binaries.set(path, bytes);
+        },
+      },
+      name,
+      data,
+      notePath,
+    );
   }
 
   linkTo(path: string, _notePath: string, alias?: string) {
@@ -85,11 +107,30 @@ class FakeVault implements VaultPort {
     this.files.set(path, content);
   }
 
+  hanging(path: string): this {
+    this.hangOn = path;
+    return this;
+  }
+
   async process(path: string, fn: (data: string) => string) {
     if (path === this.failOn) throw new Error("disk full");
+    if (path === this.hangOn) await new Promise(() => undefined);
     const text = this.files.get(path);
     if (text === undefined) throw new Error("the note is missing");
     this.files.set(path, fn(text));
+  }
+
+  async unlink(path: string, id: string) {
+    const text = this.files.get(path);
+    if (text === undefined) return;
+    const fm = readFrontmatter(text);
+    const ids = withoutLinkedId(fm[LINK_PROPERTY], id);
+    if (ids) fm[LINK_PROPERTY] = ids;
+    else delete fm[LINK_PROPERTY];
+    const map = withHeading(fm[HEADING_PROPERTY], id, undefined);
+    if (map) fm[HEADING_PROPERTY] = map;
+    else delete fm[HEADING_PROPERTY];
+    this.files.set(path, (Object.keys(fm).length > 0 ? writeFrontmatter(fm) : "") + stripFrontmatter(text));
   }
 
   async link(path: string, id: string, heading?: string) {
@@ -148,16 +189,16 @@ function stripFrontmatter(text: string): string {
   return text.replace(/^---\n[\s\S]*?\n---\n?/, "");
 }
 
-function exportText(blocks: Array<{ name: string; id?: string; body: string }>, date = "2026-10-25T17:00:00Z"): string {
+function exportText(blocks: Array<{ name: string; id?: string; workspace?: string; body: string }>, date = "2026-10-25T17:00:00Z"): string {
   const parts = [`<!-- jot:export v=1 date=${date} -->`, "Stats: n jots", ""];
   for (const b of blocks) {
-    parts.push(`<!-- jot:category name=${JSON.stringify(b.name)}${b.id ? ` id="${b.id}"` : ""} -->`, b.body, "<!-- /jot:category -->", "");
+    const attributes = `name=${JSON.stringify(b.name)}${b.id ? ` id="${b.id}"` : ""}${b.workspace ? ` workspace=${JSON.stringify(b.workspace)}` : ""}`;
+    parts.push(`<!-- jot:category ${attributes} -->`, b.body, "<!-- /jot:category -->", "");
   }
   return parts.join("\n");
 }
 
-const NAME: ImportSettings = { mode: "name", folder: "Jot", position: "bottom", heading: "" };
-const LINKED: ImportSettings = { ...NAME, mode: "linked" };
+const SETTINGS: ImportSettings = { folder: "Jot", position: "bottom", heading: "" };
 const INSERT = { position: "bottom" as const, heading: "" };
 
 async function importInto(
@@ -174,22 +215,23 @@ async function importInto(
   return { plan, ...outcome };
 }
 
-test("name mode: appends to the same-named note in the folder and creates the rest", async () => {
+test("an export with no ids (an older Jot) goes to the same-named notes in the Folder, created if missing", async () => {
   const vault = new FakeVault({ "Jot/Dev.md": "# Dev\n\n- old\n", "Areas/Jot.md": "elsewhere\n" });
   const text = exportText([
-    { name: "DEV", id: DEV, body: "- new dev" },
-    { name: "Jot", id: JOT, body: "- new jot" },
+    { name: "DEV", body: "- new dev" },
+    { name: "Jot", body: "- new jot" },
   ]);
-  const { plan, result, error } = await importInto(vault, text, NAME);
+  const { plan, result, error } = await importInto(vault, text, SETTINGS);
   assert.equal(error, null);
-  assert.equal(plan.toLink.length, 0, "name mode never asks");
+  assert.equal(plan.toLink.length, 0, "nothing to link, so nothing to ask");
+  assert.equal(plan.unlinkable, 2);
   assert.equal(vault.files.get("Jot/Dev.md"), "# Dev\n\n- old\n\n- new dev\n");
   assert.equal(vault.files.get("Jot/Jot.md"), "- new jot\n", "a note in another folder isn't used");
   assert.equal(vault.files.get("Areas/Jot.md"), "elsewhere\n");
-  assert.deepEqual(result, { notes: ["Dev", "Jot"], created: ["Jot"], linked: [], attachments: 0 });
+  assert.deepEqual(result, { notes: ["Dev", "Jot"], created: ["Jot"], linked: [], attachments: 0, unreadable: 0 });
 });
 
-test("linked mode, first import: asks once per category, with the same-named note picked", async () => {
+test("first import: asks once per category, with the same-named note picked", async () => {
   const vault = new FakeVault({ "Areas/Dev.md": "# Dev\n", "Projects/Project Jot.md": "# Jot\n" });
   const parsed = parseJotExport(
     exportText([
@@ -199,7 +241,7 @@ test("linked mode, first import: asks once per category, with the same-named not
     ]),
   );
   assert.ok(parsed);
-  const plan = planImport(parsed, vault.notes(), LINKED);
+  const plan = planImport(parsed, vault.notes(), SETTINGS);
   assert.deepEqual(
     plan.toLink.map((r) => [r.block.name, r.suggestion.pick?.path ?? null, r.suggestion.others.map((n) => n.path), r.newPath, r.newPathExists]),
     [
@@ -209,9 +251,14 @@ test("linked mode, first import: asks once per category, with the same-named not
     ],
   );
   assert.ok(plan.writes.every((w) => w.path === null), "nothing is written before the answers");
+  assert.deepEqual(
+    plan.toLink.map(startingChoice),
+    [{ kind: "note", path: "Areas/Dev.md" }, null, { kind: "new" }],
+    "a similar note is never picked for you, and nothing similar starts on a new note",
+  );
 });
 
-test("linked mode: the answers are stamped once, then later imports go straight there", async () => {
+test("the answers are stamped once, then later imports go straight there", async () => {
   const vault = new FakeVault({
     "Areas/Dev.md": "---\nstatus: active\n---\n# Dev\n",
     "Projects/Project Jot.md": "# Jot\n",
@@ -226,7 +273,7 @@ test("linked mode: the answers are stamped once, then later imports go straight 
     [JOT, { kind: "note", path: "Projects/Project Jot.md" }],
     [NEWCAT, { kind: "new" }],
   ]);
-  const one = await importInto(vault, first, LINKED, choices);
+  const one = await importInto(vault, first, SETTINGS, choices);
   assert.equal(one.error, null);
   assert.deepEqual(one.result.linked, ["DEV", "JOT", "Brand New"]);
   assert.deepEqual(one.result.created, ["Brand New"]);
@@ -240,23 +287,23 @@ test("linked mode: the answers are stamped once, then later imports go straight 
   // The user renames and moves the note, and renames the category in Jot.
   vault.files.set("Archive/Jot app.md", vault.files.get("Projects/Project Jot.md") ?? "");
   vault.files.delete("Projects/Project Jot.md");
-  const second = await importInto(vault, exportText([{ name: "Jot (the app)", id: JOT, body: "- d" }], "2026-10-26T09:00:00Z"), LINKED);
+  const second = await importInto(vault, exportText([{ name: "Jot (the app)", id: JOT, body: "- d" }], "2026-10-26T09:00:00Z"), SETTINGS);
   assert.equal(second.plan.toLink.length, 0, "no questions the second time");
   assert.equal(second.error, null);
   assert.ok(vault.files.get("Archive/Jot app.md")?.endsWith("# Jot\n\n- b\n\n- d\n"));
   assert.ok(!vault.files.has("Jot/Jot (the app).md"), "no stray note for the new name");
 });
 
-test("linked mode: linking a note that starts with a byte-order mark adds no second properties block", async () => {
+test("linking a note that starts with a byte-order mark adds no second properties block", async () => {
   // Obsidian's property editing doesn't see properties behind the mark (the fake vault's doesn't either).
   const vault = new FakeVault({ "Areas/Dev.md": "\uFEFF---\nstatus: active\n---\n# Dev\n" });
   const text = exportText([{ name: "Dev", id: DEV, body: "- a" }]);
-  const { error } = await importInto(vault, text, { ...LINKED, position: "top" }, new Map([[DEV, { kind: "note", path: "Areas/Dev.md" }]]));
+  const { error } = await importInto(vault, text, { ...SETTINGS, position: "top" }, new Map([[DEV, { kind: "note", path: "Areas/Dev.md" }]]));
   assert.equal(error, null);
   assert.equal(vault.files.get("Areas/Dev.md"), `---\nstatus: active\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n# Dev\n\n- a\n`);
 });
 
-test("linked mode: two categories can share a note, and a note holds both ids", async () => {
+test("two categories can share a note, and a note holds both ids", async () => {
   const vault = new FakeVault({ "Inbox.md": "" });
   const text = exportText([
     { name: "A", id: DEV, body: "- a" },
@@ -266,64 +313,126 @@ test("linked mode: two categories can share a note, and a note holds both ids", 
     [DEV, { kind: "note", path: "Inbox.md" }],
     [JOT, { kind: "note", path: "Inbox.md" }],
   ]);
-  const { result } = await importInto(vault, text, LINKED, choices);
+  const { result } = await importInto(vault, text, SETTINGS, choices);
   assert.deepEqual(result.notes, ["Inbox"]);
   assert.deepEqual(vault.notes().find((n) => n.path === "Inbox.md")?.linkedIds, [DEV, JOT]);
   assert.ok(vault.files.get("Inbox.md")?.endsWith("- a\n\n- b\n"));
 });
 
-test("linked mode: an export without ids (Jot 1.5) goes by name and says so", async () => {
+test("an export without ids (Jot 1.5) goes by name and says so", async () => {
   const vault = new FakeVault({ "Jot/Ideas.md": "" });
-  const { plan, result } = await importInto(vault, exportText([{ name: "Ideas", body: "- x" }]), LINKED);
+  const { plan, result } = await importInto(vault, exportText([{ name: "Ideas", body: "- x" }]), SETTINGS);
   assert.equal(plan.unlinkable, 1);
   assert.equal(plan.toLink.length, 0);
   assert.deepEqual(result.notes, ["Ideas"]);
 });
 
-test("linked mode: the same id in two notes uses the first and reports it", async () => {
+test("the same id in two notes uses the first and reports it", async () => {
   const vault = new FakeVault({
     "B/Ideas.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n`,
     "A.md": `---\n${LINK_PROPERTY}: ${DEV}\n---\n`,
   });
-  const { plan } = await importInto(vault, exportText([{ name: "Ideas", id: DEV, body: "- x" }]), LINKED);
+  const { plan } = await importInto(vault, exportText([{ name: "Ideas", id: DEV, body: "- x" }]), SETTINGS);
   assert.deepEqual(plan.ambiguous, ["Ideas"]);
   assert.ok(vault.files.get("A.md")?.endsWith("- x\n"), "a hand-written single id counts too");
 });
 
-test("two new categories answered with 'new note' and the same file name share one note", async () => {
+test("two new categories whose names make the same file name each get a note of their own", async () => {
   const vault = new FakeVault();
   const text = exportText([
     { name: "Work / Life", id: DEV, body: "- a" },
     { name: "Work - Life", id: JOT, body: "- b" },
   ]);
-  const { result, error } = await importInto(vault, text, LINKED);
+  const { plan, result, error } = await importInto(vault, text, SETTINGS);
   assert.equal(error, null);
-  assert.deepEqual(result.created, ["Work - Life"]);
-  assert.deepEqual(vault.notes()[0].linkedIds, [DEV, JOT]);
+  assert.deepEqual(plan.toLink.map((r) => [r.newPath, r.newPathExists]), [["Jot/Work - Life.md", false], ["Jot/Work - Life 1.md", false]]);
+  assert.deepEqual(plan.toLink.map(startingChoice), [{ kind: "new" }, { kind: "new" }]);
+  assert.deepEqual(result.created, ["Work - Life", "Work - Life 1"]);
+  assert.deepEqual(vault.notes().map((n) => [n.path, n.linkedIds]), [["Jot/Work - Life.md", [DEV]], ["Jot/Work - Life 1.md", [JOT]]]);
 });
 
-test("categories whose names differ only in case share one note instead of colliding", async () => {
+test("C, C# and C++ are three categories with three notes", async () => {
+  const C = "0D4C2A1B-1111-4A2B-9C3D-00000000000C";
+  const vault = new FakeVault();
+  const text = exportText([
+    { name: "C", id: C, body: "- pointers" },
+    { name: "C#", id: DEV, body: "- LINQ" },
+    { name: "C++", id: JOT, body: "- templates" },
+  ]);
+  const { plan, error } = await importInto(vault, text, SETTINGS);
+  assert.equal(error, null);
+  assert.deepEqual(plan.toLink.map((r) => r.newPath), ["Jot/C.md", "Jot/C 1.md", "Jot/C++.md"]);
+  assert.equal(vault.files.get("Jot/C.md"), `---\n${LINK_PROPERTY}:\n  - ${C}\n---\n- pointers\n`);
+  assert.ok(vault.files.get("Jot/C 1.md")?.endsWith("- LINQ\n"));
+  assert.ok(vault.files.get("Jot/C++.md")?.endsWith("- templates\n"));
+
+  // C++'s same-named note is C++.md, never C's.
+  const later = planImport(parseJotExport(exportText([{ name: "C++", id: NEWCAT, body: "- x" }]))!, [
+    { path: "Jot/C.md", basename: "C", aliases: [], linkedIds: [] },
+    { path: "Jot/C++.md", basename: "C++", aliases: [], linkedIds: [] },
+  ], SETTINGS);
+  assert.equal(later.toLink[0].suggestion.pick?.path, "Jot/C++.md");
+});
+
+test("with no ids, names that differ only in case share a note; with ids, each gets its own", async () => {
   const vault = new FakeVault();
   const text = exportText([
     { name: "Work", body: "- w1" },
     { name: "work", body: "- w2" },
   ]);
-  const { result, error } = await importInto(vault, text, NAME);
+  const { result, error } = await importInto(vault, text, SETTINGS);
   assert.equal(error, null);
   assert.deepEqual([...vault.files.keys()], ["Jot/Work.md"]);
   assert.equal(vault.files.get("Jot/Work.md"), "- w1\n\n- w2\n");
   assert.deepEqual(result.created, ["Work"]);
 
-  // Linked mode, both answered "New note".
+  // With ids, both answered "New note".
   const linked = new FakeVault();
   const two = exportText([
     { name: "Ideas", id: DEV, body: "- a" },
     { name: "IDEAS", id: JOT, body: "- b" },
   ]);
-  const outcome = await importInto(linked, two, LINKED);
+  const outcome = await importInto(linked, two, SETTINGS);
   assert.equal(outcome.error, null);
-  assert.deepEqual(outcome.plan.toLink.map((r) => r.newPath), ["Jot/Ideas.md", "Jot/Ideas.md"]);
-  assert.deepEqual(linked.notes().map((n) => [n.path, n.linkedIds]), [["Jot/Ideas.md", [DEV, JOT]]]);
+  assert.deepEqual(outcome.plan.toLink.map((r) => r.newPath), ["Jot/Ideas.md", "Jot/IDEAS 1.md"]);
+  assert.deepEqual(linked.notes().map((n) => [n.path, n.linkedIds]), [["Jot/Ideas.md", [DEV]], ["Jot/IDEAS 1.md", [JOT]]]);
+});
+
+test("a same-named note that holds another category is never the default: the row waits, New note is numbered", async () => {
+  // Two workspaces with an Inbox each: the first is linked to Jot/Inbox.md already.
+  const vault = new FakeVault({ "Jot/Inbox.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n- work inbox\n`, "Jot/Inbox 1.md": "mine\n" });
+  const text = exportText([{ name: "Inbox", id: NEWCAT, body: "- home inbox" }]);
+  const parsed = parseJotExport(text);
+  assert.ok(parsed);
+  const plan = planImport(parsed, vault.notes(), SETTINGS);
+  const [request] = plan.toLink;
+  assert.equal(request.linkedSameName, "Jot/Inbox.md");
+  assert.deepEqual([request.newPath, request.newPathExists], ["Jot/Inbox 2.md", false], "a taken number is skipped");
+  assert.equal(startingChoice(request), null, "the import waits for a choice");
+
+  const { error, result } = await importInto(vault, text, SETTINGS, new Map([[NEWCAT, { kind: "new" }]]));
+  assert.equal(error, null);
+  assert.equal(vault.files.get("Jot/Inbox.md"), `---\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n- work inbox\n`, "untouched");
+  assert.equal(vault.files.get("Jot/Inbox 2.md"), `---\n${LINK_PROPERTY}:\n  - ${NEWCAT}\n---\n- home inbox\n`);
+  assert.deepEqual(result.created, ["Inbox 2"]);
+
+  // Chosen on purpose, the note holds both.
+  const shared = new FakeVault({ "Jot/Inbox.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n` });
+  await importInto(shared, text, SETTINGS, new Map([[NEWCAT, { kind: "note", path: "Jot/Inbox.md" }]]));
+  assert.deepEqual(shared.notes()[0].linkedIds, [DEV, NEWCAT]);
+
+  // An unlinked note with the name elsewhere is still where the row starts.
+  const elsewhere = new FakeVault({ "Jot/Inbox.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n`, "Home/Inbox.md": "" });
+  const again = planImport(parsed, elsewhere.notes(), SETTINGS);
+  assert.deepEqual(startingChoice(again.toLink[0]), { kind: "note", path: "Home/Inbox.md" });
+  assert.equal(again.toLink[0].newPath, "Jot/Inbox 1.md");
+});
+
+test("an export with no ids goes by name, even into a note linked to a category", async () => {
+  const vault = new FakeVault({ "Jot/Inbox.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n` });
+  const { error } = await importInto(vault, exportText([{ name: "Inbox", body: "- x" }]), SETTINGS);
+  assert.equal(error, null);
+  assert.ok(vault.files.get("Jot/Inbox.md")?.endsWith("- x\n"));
 });
 
 test("a failure stops the import and says what was already written", async () => {
@@ -336,86 +445,103 @@ test("a failure stops the import and says what was already written", async () =>
       { name: "B", body: "- b" },
       { name: "C", body: "- c" },
     ]),
-    NAME,
+    SETTINGS,
   );
   assert.deepEqual(error, { path: "Jot/B.md", message: "disk full" });
   assert.deepEqual(result.notes, ["A"]);
   assert.ok(!vault.files.has("Jot/C.md"), "nothing after the failure");
 });
 
+/** Imports the way the plugin does: each record it gets replaces the export's earlier one in `history`. */
+async function importTracked(vault: FakeVault, text: string, history: { list: ImportRecord[] }, at = 1, media?: MediaSource) {
+  const parsed = parseJotExport(text);
+  assert.ok(parsed);
+  const print = fingerprint(text);
+  const outcome = await importExport({
+    parsed,
+    print,
+    prior: priorImport(history.list, print),
+    notes: vault.notes(),
+    settings: SETTINGS,
+    ask: async () => new Map(),
+    port: vault,
+    options: INSERT,
+    media,
+    progress: async (record) => {
+      history.list = recordImport(history.list, record, HISTORY_LIMIT);
+    },
+    now: () => at,
+  });
+  assert.ok(outcome);
+  if (outcome.record) history.list = recordImport(history.list, outcome.record, HISTORY_LIMIT);
+  return outcome;
+}
+
+const ABC = exportText([
+  { name: "A", body: "- a" },
+  { name: "B", body: "- b" },
+  { name: "C", body: "- c" },
+]);
+
 test("a stopped import picks up where it stopped, so a retry adds nothing twice", async () => {
   const vault = new FakeVault({ "Jot/A.md": "", "Jot/B.md": "" });
   vault.failOn = "Jot/B.md";
-  const text = exportText([
-    { name: "A", body: "- a" },
-    { name: "B", body: "- b" },
-    { name: "C", body: "- c" },
-  ]);
-  const print = fingerprint(text);
-  const parsed = parseJotExport(text);
-  assert.ok(parsed);
+  const print = fingerprint(ABC);
+  const history = { list: [] as ImportRecord[] };
 
-  // What the plugin does with each attempt: skip what an earlier one wrote, then record this one.
-  let history: ImportRecord[] = [];
-  const attempt = async (at: number) => {
-    const prior = priorImport(history, print);
-    const skip = prior.kind === "stopped" ? prior.written : 0;
-    const plan = planImport({ ...parsed, blocks: parsed.blocks.slice(skip) }, vault.notes(), NAME);
-    const outcome = await runImport(resolvePlan(plan, new Map()), vault, INSERT);
-    const record = { fingerprint: print, importedAt: at, notes: outcome.result.notes.length };
-    history = recordImport(history, outcome.error ? { ...record, stoppedAfter: skip + outcome.written } : record, 100);
-    return outcome;
-  };
-
-  const first = await attempt(1);
-  assert.equal(first.written, 1);
-  assert.deepEqual(priorImport(history, print), { kind: "stopped", written: 1 }, "a stopped import isn't 'already imported'");
+  const first = await importTracked(vault, ABC, history, 1);
+  assert.equal(first.result.notes.length, 1);
+  assert.deepEqual(priorImport(history.list, print), { kind: "stopped", written: 1, unreadable: 0 }, "a stopped import isn't 'already imported'");
 
   vault.failOn = null; // the user fixes whatever stopped it
-  const second = await attempt(2);
+  const second = await importTracked(vault, ABC, history, 2);
   assert.equal(second.error, null);
+  assert.equal(second.resumed, 1);
   assert.equal(vault.files.get("Jot/A.md"), "- a\n", "not added twice");
   assert.equal(vault.files.get("Jot/B.md"), "- b\n");
   assert.equal(vault.files.get("Jot/C.md"), "- c\n");
-  assert.deepEqual(priorImport(history, print), { kind: "done", at: 2 });
-  assert.equal(history.length, 1, "one record per export");
+  assert.deepEqual(priorImport(history.list, print), { kind: "done", at: 2 });
+  assert.equal(history.list.length, 1, "one record per export");
 });
+
+/** Lets the import run until it waits on a write that never finishes, as when Obsidian is killed. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 test("an import cut off midway (Obsidian quit or killed) resumes after the blocks it wrote", async () => {
   const vault = new FakeVault({ "Jot/A.md": "", "Jot/B.md": "", "Jot/C.md": "" });
-  const text = exportText([
-    { name: "A", body: "- a" },
-    { name: "B", body: "- b" },
-    { name: "C", body: "- c" },
-  ]);
-  const print = fingerprint(text);
-  const parsed = parseJotExport(text);
-  assert.ok(parsed);
+  const print = fingerprint(ABC);
+  const history = { list: [] as ImportRecord[] };
 
-  // What the plugin saves: a record before the first write, then the
-  // progress after each block. Nothing after the loop runs when the app dies.
-  let history: ImportRecord[] = [];
-  const save = (stoppedAfter: number) => {
-    history = recordImport(history, { fingerprint: print, importedAt: 1, notes: 0, stoppedAfter }, 100);
-  };
-  const attempt = async () => {
-    const prior = priorImport(history, print);
-    const skip = prior.kind === "stopped" ? prior.written : 0;
-    const plan = planImport({ ...parsed, blocks: parsed.blocks.slice(skip) }, vault.notes(), NAME);
-    save(skip);
-    return runImport(resolvePlan(plan, new Map()), vault, INSERT, async (written) => save(skip + written));
-  };
+  vault.hangOn = "Jot/C.md"; // killed while it writes C
+  void importTracked(vault, ABC, history);
+  await settle();
+  assert.deepEqual(priorImport(history.list, print), { kind: "stopped", written: 2, unreadable: 0 });
 
-  vault.failOn = "Jot/C.md"; // the app is killed while it writes C
-  await attempt();
-  assert.deepEqual(priorImport(history, print), { kind: "stopped", written: 2 });
-
-  vault.failOn = null;
-  const retry = await attempt();
+  vault.hangOn = null;
+  const retry = await importTracked(vault, ABC, history);
   assert.equal(retry.error, null);
   assert.equal(vault.files.get("Jot/A.md"), "- a\n", "not added twice");
   assert.equal(vault.files.get("Jot/B.md"), "- b\n", "not added twice");
   assert.equal(vault.files.get("Jot/C.md"), "- c\n");
+});
+
+test("an import cut off before its first block went in isn't 'stopped partway'", async () => {
+  const vault = new FakeVault({ "Jot/A.md": "" });
+  const print = fingerprint(ABC);
+  const history = { list: [] as ImportRecord[] };
+  vault.hangOn = "Jot/A.md";
+  void importTracked(vault, ABC, history);
+  await settle();
+  assert.deepEqual(priorImport(history.list, print), { kind: "new" }, "nothing was saved");
+
+  // An earlier finished import of the same file still counts as imported.
+  const done = { list: [{ fingerprint: print, importedAt: 5, notes: 3 }] as ImportRecord[] };
+  void importTracked(new FakeVault({ "Jot/A.md": "" }).hanging("Jot/A.md"), ABC, done);
+  await settle();
+  assert.deepEqual(priorImport(done.list, print), { kind: "done", at: 5 });
+
+  // A record saved before any block went in, as earlier versions did, means nothing to resume.
+  assert.deepEqual(priorImport([{ fingerprint: print, importedAt: 5, notes: 0, stoppedAfter: 0 }], print), { kind: "new" });
 });
 
 test("two devices' histories merge: every export once, its newest record, newest first", () => {
@@ -440,7 +566,7 @@ test("the export file itself is never a target", async () => {
   const vault = new FakeVault({ "jot-export-ideas.md": "" });
   const parsed = parseJotExport(exportText([{ name: "jot-export-ideas", id: DEV, body: "- x" }]));
   assert.ok(parsed);
-  const plan = planImport(parsed, vault.notes(), { ...LINKED, folder: "" }, new Set(["jot-export-ideas.md"]));
+  const plan = planImport(parsed, vault.notes(), { ...SETTINGS, folder: "" }, new Set(["jot-export-ideas.md"]));
   assert.equal(plan.toLink[0].suggestion.pick, null);
 });
 
@@ -452,27 +578,27 @@ test("an export pasted into a category's note is never written into: that catego
   ]);
   const note = "# My ideas\n\n" + text;
   const vault = new FakeVault({ "Ideas.md": note, "Work.md": "" });
-  const { plan, result, error } = await importInto(vault, text, { ...NAME, folder: "" }, new Map(), new Set(["Ideas.md"]));
+  const { plan, result, error } = await importInto(vault, text, { ...SETTINGS, folder: "" }, new Map(), new Set(["Ideas.md"]));
   assert.equal(error, null);
   assert.equal(vault.files.get("Ideas.md"), note, "the export's note is untouched");
   assert.equal(vault.files.get("Ideas 1.md"), "- idea\n");
   assert.equal(vault.files.get("Work.md"), "- work\n");
   assert.deepEqual(result.created, ["Ideas 1"]);
   assert.deepEqual(plan.besideExport, [{ name: "Ideas", path: "Ideas 1.md", exportPath: "Ideas.md" }]);
-  assert.ok(summaryText(result, 0, [], 0, plan.besideExport).includes("The Ideas jots went to Ideas 1 because this export is in Ideas."));
+  assert.ok(summaryText(result, { besideExport: plan.besideExport }).includes("The Ideas jots went to Ideas 1 because this export is in Ideas."));
 
   // Another case or Unicode form is the same file on disk; a taken number is skipped.
   const loose = new FakeVault({ "ideas.md": text, "Ideas 1.md": "mine\n" });
-  const two = await importInto(loose, text, { ...NAME, folder: "" }, new Map(), new Set(["ideas.md"]));
+  const two = await importInto(loose, text, { ...SETTINGS, folder: "" }, new Map(), new Set(["ideas.md"]));
   assert.equal(two.error, null);
   assert.equal(loose.files.get("ideas.md"), text);
   assert.equal(loose.files.get("Ideas 1.md"), "mine\n");
   assert.equal(loose.files.get("Ideas 2.md"), "- idea\n");
 
-  // Linked mode: "New note" is never the export either.
+  // With ids, "New note" is never the export either.
   const linked = new FakeVault({ "Jot/Ideas.md": text });
   const withId = exportText([{ name: "Ideas", id: DEV, body: "- idea" }]);
-  const three = await importInto(linked, withId, LINKED, new Map([[DEV, { kind: "new" }]]), new Set(["Jot/Ideas.md"]));
+  const three = await importInto(linked, withId, SETTINGS, new Map([[DEV, { kind: "new" }]]), new Set(["Jot/Ideas.md"]));
   assert.deepEqual(three.plan.toLink.map((r) => [r.newPath, r.newPathExists]), [["Jot/Ideas 1.md", false]]);
   assert.equal(three.error, null);
   assert.equal(linked.files.get("Jot/Ideas.md"), text);
@@ -531,12 +657,19 @@ test("at startup only recent exports are read, newest first, and reading stops a
 
   read.length = 0;
   assert.equal(await exportToOffer(old, NOW, limits, reader, () => false), null);
-  assert.deepEqual(read, [], "a vault of old exports reads nothing");
+  assert.equal(read.length, 0, "a vault of old exports reads nothing");
 
   read.length = 0;
   const notExports = await exportToOffer(files, NOW, limits, async (f) => (read.push(f.name), null), () => false);
   assert.equal(notExports, null);
   assert.equal(read.length, 3, "files that turn out not to be exports: the recent ones are read, still no old one");
+});
+
+test("export names: Jot's own, and the copies Files and browsers number", () => {
+  for (const name of ["jot-export-2026-10-29-0910", "jot-export-Work-2026-10-29-0910 2", "Work Jots", "Work Jots 2", "Work Jots (1)", "work jots(3)"]) {
+    assert.ok(looksLikeExportName(name), name);
+  }
+  for (const name of ["Ideas", "Jots of ideas", "Work Jots copy", "Work Jots 2b"]) assert.ok(!looksLikeExportName(name), name);
 });
 
 test("an export is checked as offerable before it's read", () => {
@@ -587,16 +720,19 @@ test("the new-export notice goes once its file is gone or its export was importe
 });
 
 test("notices: one period after Obsidian's own messages, and long lists cut short", () => {
-  const stopped = stoppedText({ path: "Jot/work.md", message: "File already exists." }, { notes: ["Work"], created: [], linked: [], attachments: 0 });
+  const stopped = stoppedText({ path: "Jot/work.md", message: "File already exists." }, { notes: ["Work"], created: [], linked: [], attachments: 0, unreadable: 0 });
   assert.ok(stopped.startsWith("Jot Import stopped at Jot/work.md: File already exists. Already added to: Work."), stopped);
   assert.ok(!stopped.includes(".."), stopped);
 
+  assert.equal(errorReason(new Error("File already exists. ")), "File already exists");
+  assert.equal(errorReason("disk full"), "disk full");
+
   const many = Array.from({ length: 25 }, (_, i) => `Note ${i + 1}`);
-  const summary = summaryText({ notes: many, created: many, linked: [], attachments: 0 }, 0, [], 0);
+  const summary = summaryText({ notes: many, created: many, linked: [], attachments: 0, unreadable: 0 });
   assert.ok(summary.startsWith("Jot: added to 25 notes: Note 1, Note 2,"), summary);
   assert.ok(summary.includes("and 15 more"), summary);
   assert.ok(!summary.includes("Note 25"), summary);
-  assert.equal(summaryText({ notes: ["Ideas"], created: [], linked: [], attachments: 0 }, 0, [], 0), "Jot: added to 1 note: Ideas.");
+  assert.equal(summaryText({ notes: ["Ideas"], created: [], linked: [], attachments: 0, unreadable: 0 }), "Jot: added to 1 note: Ideas.");
 });
 
 test("fingerprints are stable, ignore line endings, and differ between exports", () => {
@@ -626,7 +762,7 @@ test("top, the default, keeps a note newest first across imports (bottom zig-zag
   // Jot's default sort is newest first, within each export.
   const monday = exportText([{ name: "Ideas", body: "- 10/27 c\n\n- 10/26 b\n\n- 10/25 a" }], "2026-10-27T20:00:00Z");
   const friday = exportText([{ name: "Ideas", body: "- 10/31 f\n\n- 10/30 e\n\n- 10/29 d" }], "2026-10-31T20:00:00Z");
-  const settings: ImportSettings = { ...DEFAULT_SETTINGS, mode: "name" };
+  const settings: ImportSettings = { ...DEFAULT_SETTINGS, folder: "" };
   assert.equal(settings.position, "top");
 
   const top = new FakeVault({ "Ideas.md": "---\ntags: ideas\n---\n" });
@@ -649,30 +785,35 @@ test("top, the default, keeps a note newest first across imports (bottom zig-zag
   );
 });
 
-test("top with jots that bring their own # headings: each day keeps its jots, a # Title stays first", async () => {
+test("top with jots that bring their own # headings: each day keeps its jots; a # Title is a heading to choose", async () => {
   // Jot's timestamp prefix "# " with group by date.
   const monday = exportText([{ name: "Ideas", body: "# Oct 27, 2026\n- lamp for the hall\n\n- scarf" }], "2026-10-27T20:00:00Z");
   const tuesday = exportText([{ name: "Ideas", body: "# Oct 28, 2026\n- noodle place on Elm" }], "2026-10-28T20:00:00Z");
-  const settings: ImportSettings = { ...DEFAULT_SETTINGS, mode: "name" };
+  const settings: ImportSettings = { ...DEFAULT_SETTINGS, folder: "" };
 
   const created = new FakeVault();
   await importWith(created, monday, settings);
   await importWith(created, tuesday, settings);
   assert.equal(created.files.get("Ideas.md"), "# Oct 28, 2026\n- noodle place on Elm\n\n# Oct 27, 2026\n- lamp for the hall\n\n- scarf\n");
 
-  // The note's own title, by its name, stays first.
+  // With no heading chosen, the very top, above the note's own # Title.
   const titled = new FakeVault({ "Ideas.md": "# Ideas\n" });
   await importWith(titled, monday, settings);
-  await importWith(titled, tuesday, settings);
+  assert.equal(titled.files.get("Ideas.md"), "# Oct 27, 2026\n- lamp for the hall\n\n- scarf\n\n# Ideas\n");
+
+  // Chosen as the heading, the title keeps the jots under it.
+  const underTitle = new FakeVault({ "Ideas.md": "# Ideas\n" });
+  await importWith(underTitle, monday, { ...settings, heading: "# Ideas" });
+  await importWith(underTitle, tuesday, { ...settings, heading: "# Ideas" });
   assert.equal(
-    titled.files.get("Ideas.md"),
+    underTitle.files.get("Ideas.md"),
     "# Ideas\n\n# Oct 28, 2026\n- noodle place on Elm\n\n# Oct 27, 2026\n- lamp for the hall\n\n- scarf\n",
   );
 });
 
 test("a category's own heading: chosen once, kept in the note, used by every later import", async () => {
   const vault = new FakeVault({ "Areas/Dev.md": "# Dev\n\n## Inbox\n\n- old\n\n## Archive\n" });
-  const settings: ImportSettings = { ...LINKED, position: "top", heading: "" };
+  const settings: ImportSettings = { ...SETTINGS, position: "top", heading: "" };
   const first = exportText([
     { name: "DEV", id: DEV, body: "- a" },
     { name: "Garden", id: NEWCAT, body: "- seeds" },
@@ -705,14 +846,14 @@ test("a category's own heading whose text starts with # goes under that heading"
   const vault = new FakeVault({
     "Books.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n${HEADING_PROPERTY}:\n  ${DEV}: "## #1 picks"\n---\n## #1 picks\n- The Overstory\n\n## Later\n`,
   });
-  const { error } = await importWith(vault, exportText([{ name: "Books", id: DEV, body: "- Piranesi" }]), { ...LINKED, position: "top" });
+  const { error } = await importWith(vault, exportText([{ name: "Books", id: DEV, body: "- Piranesi" }]), { ...SETTINGS, position: "top" });
   assert.equal(error, null);
-  assert.ok(vault.files.get("Books.md")?.endsWith("---\n## #1 picks\n- Piranesi\n\n- The Overstory\n\n## Later\n"), vault.files.get("Books.md"));
+  assert.ok(vault.files.get("Books.md")?.endsWith("---\n## #1 picks\n\n- Piranesi\n\n- The Overstory\n\n## Later\n"), vault.files.get("Books.md"));
 });
 
 test("a category's heading overrides the Heading setting; no entry follows it", async () => {
   const vault = new FakeVault({ "Dev.md": "## Inbox\n", "Ideas.md": "## Inbox\n" });
-  const settings: ImportSettings = { ...LINKED, folder: "", position: "top", heading: "Inbox" };
+  const settings: ImportSettings = { ...SETTINGS, folder: "", position: "top", heading: "Inbox" };
   const text = exportText([
     { name: "Dev", id: DEV, body: "- dev" },
     { name: "Ideas", id: JOT, body: "- idea" },
@@ -733,7 +874,7 @@ test("a typed new note spelled like another new note in this import shares it", 
     { name: "Other", id: JOT, body: "- b" },
   ]);
   const choices = new Map<string, LinkChoice>([[JOT, { kind: "new", path: "Jot/ideas.md" }]]);
-  const { error } = await importWith(vault, text, LINKED, choices);
+  const { error } = await importWith(vault, text, SETTINGS, choices);
   assert.equal(error, null);
   assert.deepEqual([...vault.files.keys()], ["Jot/Ideas.md"], "one note, not a second the disk would refuse");
 });
@@ -745,8 +886,10 @@ test("a zipped export: attachments go beside each note, links point at them, a r
     read: (ref: string) => zip.read(zip.media.get(ref)!),
   };
   const vault = new FakeVault({ "Travel/Places.md": "# Places\n" });
-  const settings: ImportSettings = { ...DEFAULT_SETTINGS, mode: "name", folder: "Travel" };
+  // A user who had same-named notes: each category starts on its note, and is linked to it.
+  const settings: ImportSettings = { ...DEFAULT_SETTINGS, folder: "Travel" };
   const one = await importWith(vault, zip.text, settings, new Map(), media);
+  assert.deepEqual(one.plan.toLink.map(startingChoice), [{ kind: "note", path: "Travel/Places.md" }, { kind: "new" }]);
   assert.equal(one.error, null);
   assert.equal(one.result.attachments, 4);
   assert.deepEqual([...vault.binaries.keys()].sort(), [
@@ -763,7 +906,7 @@ test("a zipped export: attachments go beside each note, links point at them, a r
       "gift basket [file: [[5D4C3B2A-1908-4F7E-A6D5-C4B3A2918070.pdf]]] [video: [[A1B2C3D4-E5F6-4789-8ABC-DEF012345678.mov]]]",
     ),
   );
-  assert.equal(summaryText(one.result, 0, [], 0), "Jot: added to 2 notes: Places, Gifts. Created Gifts. Saved 4 attachments.");
+  assert.equal(summaryText(one.result), "Jot: added to 2 notes: Places, Gifts. Created Gifts. Saved 4 attachments. Linked 2 categories.");
 
   // "Import again": the same files are already there, so no copies.
   const two = await importWith(vault, zip.text, settings, new Map(), media);
@@ -775,13 +918,272 @@ test("a zipped export: attachments go beside each note, links point at them, a r
   const three = await importWith(vault, zip.text, settings, new Map(), media);
   assert.equal(three.result.attachments, 1);
   assert.ok(vault.binaries.has("Travel/attachments/3F2A9C41-6B7D-4E8F-9A0B-1C2D3E4F5A6B 1.png"));
+
+  // Once more: that numbered copy is reused, not copied again as "… 2.png".
+  const four = await importWith(vault, zip.text, settings, new Map(), media);
+  assert.equal(four.result.attachments, 0);
+  assert.ok(!vault.binaries.has("Travel/attachments/3F2A9C41-6B7D-4E8F-9A0B-1C2D3E4F5A6B 2.png"));
+  assert.ok(vault.files.get("Travel/Places.md")?.includes("![[3F2A9C41-6B7D-4E8F-9A0B-1C2D3E4F5A6B 1.png]]"));
 });
 
 test("the .md alone (unzipped by hand, no media) still imports, links as Jot wrote them", async () => {
   const zip = await openZipExport(new Uint8Array(readFileSync(new URL("./fixtures/jot-export-2026-10-28-1540.zip", import.meta.url))));
   const vault = new FakeVault();
-  const { error, result } = await importWith(vault, zip.text, { ...DEFAULT_SETTINGS, mode: "name" });
+  const { error, result } = await importWith(vault, zip.text, { ...DEFAULT_SETTINGS, folder: "" });
   assert.equal(error, null);
   assert.equal(result.attachments, 0);
   assert.ok(vault.files.get("Places.md")?.includes("](media/3F2A9C41-6B7D-4E8F-9A0B-1C2D3E4F5A6B.png)"));
+});
+
+test("a damaged attachment doesn't stop the import: its jot keeps Jot's link, no note is left empty, the zip is kept", async () => {
+  const text = exportText([
+    { name: "Places", body: "- cafe ![AAAA.jpg](media/AAAA.jpg)" },
+    { name: "Gifts", body: "- scarf ![BBBB.jpg](media/BBBB.jpg)" },
+  ]);
+  const zip = await openZipExport(
+    buildZip([
+      { name: "x/x.md", data: text },
+      { name: "x/media/AAAA.jpg", data: new Uint8Array([1, 2, 3]) },
+      { name: "x/media/BBBB.jpg", data: new Uint8Array([4, 5, 6]), crc: 1234 },
+    ]),
+  );
+  const vault = new FakeVault();
+  const { result, error } = await importWith(vault, zip.text, { ...SETTINGS, folder: "" }, new Map(), zipMedia(zip));
+  assert.equal(error, null);
+  assert.equal(result.attachments, 1);
+  assert.equal(result.unreadable, 1);
+  assert.equal(vault.files.get("Places.md"), "- cafe ![[AAAA.jpg]]\n");
+  assert.equal(vault.files.get("Gifts.md"), "- scarf ![BBBB.jpg](media/BBBB.jpg)\n", "Jot's link, in a note that isn't empty");
+  assert.deepEqual([...vault.binaries.keys()], ["attachments/AAAA.jpg"]);
+  assert.equal(
+    summaryText(result, { left: { count: zip.unlinked + result.unreadable, where: "Jots/x.zip" } }),
+    "Jot: added to 2 notes: Places, Gifts. Created Places, Gifts. Saved 1 attachment. " +
+      "1 attachment wasn't imported. It's still in Jots/x.zip, which was kept.",
+  );
+  assert.ok(summaryText(result, { left: { count: 3, where: "x.zip" } }).includes("3 attachments weren't imported. They're still in x.zip, which was kept."));
+  assert.ok(!summaryText(result, { left: { count: 0, where: "x.zip" } }).includes("x.zip"));
+});
+
+test("attachments a stopped import couldn't read are still reported when it finishes", async () => {
+  const text = exportText([
+    { name: "A", body: "- a ![x](media/X.jpg)" },
+    { name: "B", body: "- b" },
+  ]);
+  const media: MediaSource = {
+    has: (ref) => ref === "media/X.jpg",
+    read: async () => {
+      throw new Error("can't be unpacked");
+    },
+  };
+  const vault = new FakeVault({ "Jot/A.md": "", "Jot/B.md": "" });
+  vault.failOn = "Jot/B.md";
+  const history = { list: [] as ImportRecord[] };
+  const first = await importTracked(vault, text, history, 1, media);
+  assert.equal(first.unreadable, 1);
+  assert.deepEqual(priorImport(history.list, fingerprint(text)), { kind: "stopped", written: 1, unreadable: 1 });
+
+  vault.failOn = null;
+  const second = await importTracked(vault, text, history, 2, media);
+  assert.equal(second.error, null);
+  assert.equal(second.unreadable, 1, "counted once the import finishes, so the zip is kept");
+  assert.equal(vault.files.get("Jot/A.md"), "- a ![x](media/X.jpg)\n");
+});
+
+// ---- Already linked categories in the dialog, and "Change where categories go"
+
+const devNote = (heading: string, body: string) =>
+  `---\n${LINK_PROPERTY}:\n  - ${DEV}\n${HEADING_PROPERTY}:\n  ${DEV}: ${JSON.stringify(heading)}\n---\n${body}`;
+
+test("the dialog lists the export's already linked categories after the new ones, starting where they go now", () => {
+  const vault = new FakeVault({ "Areas/Dev.md": devNote("Inbox", "## Inbox\n") });
+  const parsed = parseJotExport(exportText([{ name: "Dev", id: DEV, body: "- a" }, { name: "Garden", id: NEWCAT, body: "- b" }]));
+  assert.ok(parsed);
+  const plan = planImport(parsed, vault.notes(), SETTINGS);
+  assert.deepEqual(plan.toLink.map((r) => r.block.name), ["Garden"]);
+  assert.deepEqual(plan.linked.map((r) => [r.block.name, r.linked]), [["Dev", { paths: ["Areas/Dev.md"], heading: "Inbox" }]]);
+  const start = startingChoice(plan.linked[0]);
+  assert.deepEqual(start, { kind: "note", path: "Areas/Dev.md", heading: "Inbox" });
+  assert.equal(changesLink(plan.linked[0], start ?? undefined), false);
+  assert.equal(plan.linked[0].linkedSameName, null, "its own note isn't another category's");
+  assert.equal(plan.linked[0].newPath, "Jot/Dev.md", "New note is a new one");
+  // Left as it was, nothing about it changes.
+  const writes = resolvePlan(plan, new Map(start ? [[DEV, start]] : []));
+  assert.deepEqual(writes.map((w) => [w.path, w.link, w.unlinkFrom ?? []]), [["Areas/Dev.md", false, []], ["Jot/Garden.md", true, []]]);
+});
+
+test("moving an already linked category: the old note keeps its jots and loses the link, the new note gets it", async () => {
+  const vault = new FakeVault({
+    "Areas/Dev.md": devNote("Inbox", "## Inbox\n\n- old\n"),
+    "Projects/Dev log.md": "## Inbox\n",
+  });
+  const text = exportText([{ name: "Dev", id: DEV, body: "- new" }, { name: "Garden", id: NEWCAT, body: "- seeds" }]);
+  const choices = new Map<string, LinkChoice>([[DEV, { kind: "note", path: "Projects/Dev log.md", heading: "Inbox" }]]);
+  const { error, result } = await importInto(vault, text, SETTINGS, choices);
+  assert.equal(error, null);
+  assert.equal(vault.files.get("Areas/Dev.md"), "## Inbox\n\n- old\n");
+  assert.equal(vault.files.get("Projects/Dev log.md"), devNote("Inbox", "## Inbox\n\n- new\n"));
+  assert.deepEqual(result.linked, ["Dev", "Garden"]);
+
+  // The next import goes straight to the new note.
+  const next = await importInto(vault, exportText([{ name: "Dev", id: DEV, body: "- later" }], "2026-10-30T09:00:00Z"), SETTINGS);
+  assert.equal(next.plan.toLink.length, 0);
+  assert.ok(vault.files.get("Projects/Dev log.md")?.includes("- new\n\n- later\n"));
+});
+
+test("an already linked category given another heading keeps its note", async () => {
+  const vault = new FakeVault({ "Areas/Dev.md": devNote("Inbox", "## Inbox\n\n- old\n") });
+  const text = exportText([{ name: "Dev", id: DEV, body: "- new" }, { name: "Garden", id: NEWCAT, body: "- seeds" }]);
+  const choices = new Map<string, LinkChoice>([[DEV, { kind: "note", path: "Areas/Dev.md", heading: "" }]]);
+  await importInto(vault, text, SETTINGS, choices);
+  assert.equal(vault.files.get("Areas/Dev.md"), devNote("", "## Inbox\n\n- old\n\n- new\n"));
+});
+
+test("a category linked in two notes moves out of both", async () => {
+  const vault = new FakeVault({
+    "A.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n- a\n`,
+    "B/A.md": `---\n${LINK_PROPERTY}:\n  - ${DEV}\n  - ${JOT}\n---\n- b\n`,
+  });
+  const text = exportText([{ name: "Dev", id: DEV, body: "- new" }, { name: "Garden", id: NEWCAT, body: "- seeds" }]);
+  await importInto(vault, text, SETTINGS, new Map([[DEV, { kind: "new" }]]));
+  assert.equal(vault.files.get("A.md"), "- a\n");
+  assert.equal(vault.files.get("B/A.md"), `---\n${LINK_PROPERTY}:\n  - ${JOT}\n---\n- b\n`, "another category's link stays");
+  assert.equal(vault.files.get("Jot/Dev.md"), `---\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n- new\n`);
+});
+
+test("an import with nothing new doesn't ask, even with categories that could be changed", async () => {
+  const vault = new FakeVault({ "Areas/Dev.md": devNote("Inbox", "## Inbox\n") });
+  const text = exportText([{ name: "Dev", id: DEV, body: "- a" }]);
+  const parsed = parseJotExport(text);
+  assert.ok(parsed);
+  const outcome = await importExport({
+    parsed,
+    print: fingerprint(text),
+    prior: { kind: "new" },
+    notes: vault.notes(),
+    settings: SETTINGS,
+    ask: () => {
+      throw new Error("asked");
+    },
+    port: vault,
+    options: INSERT,
+    progress: async () => undefined,
+  });
+  assert.equal(outcome?.error, null);
+  assert.ok(vault.files.get("Areas/Dev.md")?.endsWith("## Inbox\n\n- a\n"));
+});
+
+test("Change where categories go: every linked category, moved without writing any jots", async () => {
+  const vault = new FakeVault({
+    "Areas/Dev.md": devNote("Inbox", "## Inbox\n\n- old\n"),
+    "Ideas.md": `---\n${LINK_PROPERTY}:\n  - ${JOT}\n---\n- idea\n`,
+  });
+  const names: Record<string, string> = { [DEV]: "Dev", [JOT]: "Ideas" };
+  const requests = linkedCategories(vault.notes(), (id) => ({ name: names[id], workspace: null }), SETTINGS);
+  assert.deepEqual(requests.map((r) => [r.block.name, r.linked?.paths]), [["Dev", ["Areas/Dev.md"]], ["Ideas", ["Ideas.md"]]]);
+  const choices = new Map(requests.map((r) => [r.block.id, startingChoice(r)!]));
+  assert.deepEqual(linkMoves(requests, choices), [], "nothing changed, nothing to do");
+
+  choices.set(DEV, { kind: "new", heading: "Inbox" });
+  const moves = linkMoves(requests, choices);
+  assert.deepEqual(moves, [{ id: DEV, name: "Dev", path: "Jot/Dev.md", heading: "Inbox", from: ["Areas/Dev.md"] }]);
+  const { created } = await applyLinkMoves(moves, vault);
+  assert.deepEqual(created, ["Dev"]);
+  assert.equal(vault.files.get("Areas/Dev.md"), "## Inbox\n\n- old\n");
+  assert.equal(vault.files.get("Jot/Dev.md"), devNote("Inbox", ""), "linked, with no jots in it");
+  assert.equal(vault.files.get("Ideas.md"), `---\n${LINK_PROPERTY}:\n  - ${JOT}\n---\n- idea\n`);
+});
+
+// ---- Workspaces: a category in one gets new notes in a folder named after it
+
+const WORK_INBOX = "0D4C2A1B-1111-4A2B-9C3D-0000000000A1";
+const HOME_INBOX = "0D4C2A1B-1111-4A2B-9C3D-0000000000A2";
+
+/** As Jot 1.7 writes it: two workspaces with an Inbox each, and a category in no workspace. */
+const WORKSPACES = [
+  "<!-- jot:export v=1 date=2026-11-02T09:00:00Z -->",
+  "Stats: 3 jots across 3 categories",
+  "",
+  "## Work",
+  "",
+  `<!-- jot:category name="Inbox" id="${WORK_INBOX}" workspace="Work" -->`,
+  "- call back about the lease",
+  "<!-- /jot:category -->",
+  "",
+  "## Home",
+  "",
+  `<!-- jot:category name="Inbox" id="${HOME_INBOX}" workspace="Home" -->`,
+  "- seeds for the garden",
+  "<!-- /jot:category -->",
+  "",
+  `<!-- jot:category name="Ideas" id="${NEWCAT}" -->`,
+  "- a reading nook",
+  "<!-- /jot:category -->",
+  "",
+].join("\n");
+
+test("workspaces: each Inbox gets a new note in its workspace's folder", async () => {
+  const vault = new FakeVault();
+  const { plan, error, result } = await importInto(vault, WORKSPACES, SETTINGS);
+  assert.deepEqual(plan.toLink.map((r) => [r.newPath, r.linkedSameName]), [
+    ["Jot/Work/Inbox.md", null],
+    ["Jot/Home/Inbox.md", null],
+    ["Jot/Ideas.md", null],
+  ]);
+  assert.deepEqual(plan.toLink.map(startingChoice), [{ kind: "new" }, { kind: "new" }, { kind: "new" }]);
+  assert.equal(error, null);
+  assert.deepEqual(result.created, ["Jot/Work/Inbox", "Jot/Home/Inbox", "Ideas"], "named by path where two share a name");
+  assert.ok(summaryText(result).startsWith("Jot: added to 3 notes: Jot/Work/Inbox, Jot/Home/Inbox, Ideas."));
+  assert.ok(vault.files.get("Jot/Work/Inbox.md")?.endsWith("- call back about the lease\n"));
+  assert.ok(vault.files.get("Jot/Home/Inbox.md")?.endsWith("- seeds for the garden\n"));
+});
+
+test("workspaces: only a same-named note in the workspace's own folder held by another category makes the row wait", () => {
+  const OTHER = "0D4C2A1B-1111-4A2B-9C3D-0000000000FF";
+  const held = `---\n${LINK_PROPERTY}:\n  - ${OTHER}\n---\n`;
+  const vault = new FakeVault({ "Jot/Inbox.md": held, "Jot/Work/Inbox.md": held, "Areas/Inbox.md": "" });
+  const parsed = parseJotExport(WORKSPACES);
+  assert.ok(parsed);
+  const [work, home] = planImport(parsed, vault.notes(), SETTINGS).toLink;
+  assert.equal(work.linkedSameName, "Jot/Work/Inbox.md");
+  assert.equal(work.newPath, "Jot/Work/Inbox 1.md");
+  assert.equal(home.linkedSameName, null, "Jot/Inbox.md isn't in Home's folder");
+  assert.equal(home.newPath, "Jot/Home/Inbox.md");
+  // Both still start on the unlinked same-named note elsewhere.
+  assert.deepEqual([work, home].map(startingChoice), [
+    { kind: "note", path: "Areas/Inbox.md" },
+    { kind: "note", path: "Areas/Inbox.md" },
+  ]);
+});
+
+test("workspaces: suggestions prefer the workspace's folder", () => {
+  const vault = new FakeVault({ "Areas/Inbox.md": "", "Jot/Inbox.md": "", "Jot/Home/Inbox.md": "" });
+  const parsed = parseJotExport(WORKSPACES);
+  assert.ok(parsed);
+  const [work, home] = planImport(parsed, vault.notes(), SETTINGS).toLink;
+  assert.equal(home.suggestion.pick?.path, "Jot/Home/Inbox.md");
+  assert.equal(work.suggestion.pick?.path, "Jot/Inbox.md", "no Inbox in Jot/Work: the shallowest, then the shortest");
+});
+
+test("workspaces: a workspace's folder is spelled as the vault spells it", async () => {
+  const vault = new FakeVault({ "Jot/Inbox.md": "mine\n", "Jot/work/Inbox.md": "work notes\n" });
+  const { plan, error } = await importInto(vault, WORKSPACES, { ...SETTINGS, folders: ["Jot", "Jot/work"] });
+  assert.deepEqual(plan.toLink.map((r) => r.newPath), ["Jot/work/Inbox.md", "Jot/Home/Inbox.md", "Jot/Ideas.md"]);
+  assert.equal(plan.toLink[0].suggestion.pick?.path, "Jot/work/Inbox.md");
+  assert.equal(error, null);
+  assert.equal(vault.files.get("Jot/Inbox.md"), "mine\n", "the Folder's own Inbox isn't a workspace's");
+  assert.ok(vault.files.get("Jot/work/Inbox.md")?.endsWith("work notes\n\n- call back about the lease\n"));
+  assert.ok(vault.files.get("Jot/Home/Inbox.md")?.endsWith("- seeds for the garden\n"));
+});
+
+test("workspaces: an export without them goes where it always did", async () => {
+  const older = WORKSPACES.replace(/ workspace="[^"]*"/g, "");
+  const vault = new FakeVault();
+  const { plan } = await importInto(vault, older, SETTINGS);
+  assert.deepEqual(plan.toLink.map((r) => r.newPath), ["Jot/Inbox.md", "Jot/Inbox 1.md", "Jot/Ideas.md"]);
+});
+
+test("workspaces: Change where categories go offers a new note in the category's workspace folder", () => {
+  const vault = new FakeVault({ "Areas/Inbox.md": `---\n${LINK_PROPERTY}:\n  - ${HOME_INBOX}\n---\n` });
+  const [request] = linkedCategories(vault.notes(), () => ({ name: "Inbox", workspace: "Home" }), SETTINGS);
+  assert.equal(request.newPath, "Jot/Home/Inbox.md");
 });

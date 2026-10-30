@@ -1,21 +1,11 @@
 /*
- * A small ZIP reader, enough for the zips Jot shares when an export has
- * photos or files (`ExportFile.materialize` zips a folder with
- * NSFileCoordinator's `.forUploading`). It reads the central directory,
- * checks every entry, and inflates one entry at a time with the platform's
- * `DecompressionStream("deflate-raw")`, so there's no third-party code and
- * no Node or Electron API: it runs the same on desktop and mobile.
- *
- * Handles stored (0) and deflated (8) entries, data descriptors (Apple's
- * zips have sizes in the central directory only) and ZIP64 sizes. Refuses
- * encrypted and multi-disk zips, entries whose path could climb out of a
- * folder ("zip slip"), and anything bigger than the limits (`ZIP_LIMITS`, or
- * `MOBILE_ZIP_LIMITS` on a phone or tablet). Pure: no Obsidian imports, so
- * the tests run it on real zips under Node.
+ * A minimal ZIP reader for Jot's exports. It inflates with the platform's DecompressionStream, so it needs no
+ * dependencies or Node APIs and runs on mobile. Supports stored and deflated entries, data descriptors and ZIP64;
+ * refuses encrypted and multi-disk zips, paths that escape their folder ("zip slip") and anything over the limits.
  */
 
 export interface ZipEntry {
-  /** Path inside the zip, "/"-separated, NFC (macOS writes some names decomposed). */
+  /** "/"-separated and NFC, since macOS writes some names decomposed. */
   name: string;
   /** 0 = stored, 8 = deflated. */
   method: number;
@@ -26,15 +16,15 @@ export interface ZipEntry {
   offset: number;
 }
 
-/** A zip Jot Import won't read; `message` is one sentence for the notice. */
+/** The message is one sentence, shown to the user. */
 export class ZipError extends Error {}
 
 export interface ZipLimits {
-  /** The zip file itself. Larger ones aren't read into memory at all. */
+  /** Checked before reading, so a larger zip is never loaded into memory. */
   zipBytes: number;
   /** One entry, unpacked. */
   entryBytes: number;
-  /** All the entries an import unpacks, together. */
+  /** All entries an import unpacks, together. */
   totalBytes: number;
   /** The export's Markdown file, unpacked. */
   textBytes: number;
@@ -43,7 +33,6 @@ export interface ZipLimits {
 
 const MB = 1024 * 1024;
 
-/** On desktop. */
 export const ZIP_LIMITS: ZipLimits = {
   zipBytes: 1024 * MB,
   entryBytes: 512 * MB,
@@ -52,11 +41,7 @@ export const ZIP_LIMITS: ZipLimits = {
   entries: 10000,
 };
 
-/**
- * On a phone or tablet, where the whole zip and the file being unpacked sit
- * in a WebView's memory together: half as much. A larger export says so,
- * with the same notice, before anything is written.
- */
+/** Half the desktop limits: on mobile the whole zip and the entry being unpacked share a WebView's memory. */
 export const MOBILE_ZIP_LIMITS: ZipLimits = {
   ...ZIP_LIMITS,
   zipBytes: 512 * MB,
@@ -70,14 +55,13 @@ const ZIP64_EOCD = 0x06064b50;
 const CENTRAL = 0x02014b50;
 const LOCAL = 0x04034b50;
 
-/** Whether the bytes start like a zip (a local header, or an empty zip's end record). */
+/** Whether the bytes start with a local header, or an empty zip's end record. */
 export function looksLikeZip(bytes: Uint8Array): boolean {
   if (bytes.length < 4) return false;
   const sig = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
   return sig >>> 0 === LOCAL || sig >>> 0 === EOCD;
 }
 
-/** Whether this device can inflate zip entries (`DecompressionStream` with "deflate-raw"). */
 export function canInflate(): boolean {
   try {
     // Constructing one throws where the format isn't supported (Safari before 16.4).
@@ -87,18 +71,14 @@ export function canInflate(): boolean {
   }
 }
 
-/**
- * Whether an entry name is a plain relative path: no "..", no leading "/",
- * no drive letter, no backslash, no control characters. Jot never writes
- * anything else; a zip that does is refused whole.
- */
+/** A plain relative path that can't escape its folder. Jot never writes anything else, so a zip that does is refused. */
 export function isSafeEntryName(name: string): boolean {
   if (name.length === 0 || name.startsWith("/") || /^[A-Za-z]:/.test(name) || name.includes("\\")) return false;
   for (let i = 0; i < name.length; i++) if (name.charCodeAt(i) < 0x20) return false;
   return !name.split("/").some((part) => part === "..");
 }
 
-/** The central directory: every file entry (folders are left out), checked against the limits. */
+/** Every file entry in the central directory (folders skipped), each checked for safety and against `limits`. */
 export function readZipDirectory(data: Uint8Array, limits: ZipLimits = ZIP_LIMITS): ZipEntry[] {
   if (data.length > limits.zipBytes) throw new ZipError("The zip is too large to import.");
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -161,10 +141,8 @@ export function readZipDirectory(data: Uint8Array, limits: ZipLimits = ZIP_LIMIT
 }
 
 /**
- * One entry's bytes, inflated and checked against its size and CRC. Never
- * allocates more than the size the directory gave (already within the
- * limits' `entryBytes`), and stops as soon as the data runs past it. The
- * array is always its own buffer, whole (see `wholeBuffer`).
+ * One entry's bytes, checked against its size and CRC. Allocates only the directory's size (already within the
+ * limits) and stops if the data runs past it. Always a fresh buffer, so wholeBuffer needn't copy it.
  */
 export async function readZipEntry(data: Uint8Array, entry: ZipEntry): Promise<Uint8Array> {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -180,14 +158,28 @@ export async function readZipEntry(data: Uint8Array, entry: ZipEntry): Promise<U
   return bytes;
 }
 
+const INFLATE_CHUNK = 1024 * 1024;
+
 async function inflate(packed: Uint8Array, size: number): Promise<Uint8Array> {
   if (!canInflate()) {
     throw new ZipError("This device can't unzip files. Unzip the export first, then import the .md file inside.");
   }
   const out = new Uint8Array(size);
   let filled = 0;
-  const stream = new Blob([packed as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-  const reader = stream.getReader();
+  // Slices of the zip's own bytes, so the packed entry is never copied whole (a Blob would copy it).
+  let at = 0;
+  const source = new ReadableStream<Uint8Array<ArrayBuffer>>({
+    pull(controller) {
+      if (at >= packed.length) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(at + INFLATE_CHUNK, packed.length);
+      controller.enqueue(packed.subarray(at, end) as Uint8Array<ArrayBuffer>);
+      at = end;
+    },
+  });
+  const reader = source.pipeThrough(new DecompressionStream("deflate-raw")).getReader();
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -211,7 +203,7 @@ function findEnd(view: DataView): number {
   for (let i = last; i >= first; i--) {
     if (view.getUint32(i, true) === EOCD && i + 22 + view.getUint16(i + 20, true) === view.byteLength) return i;
   }
-  // A comment length that doesn't reach the end exactly: take the last signature.
+  // No record whose comment length reaches the end exactly: take the last signature.
   for (let i = last; i >= first; i--) if (view.getUint32(i, true) === EOCD) return i;
   return -1;
 }
@@ -240,6 +232,7 @@ function readZip64Extra(
   while (at + 4 <= end) {
     const id = view.getUint16(at, true);
     const len = view.getUint16(at + 2, true);
+    if (at + 4 + len > end) throw new ZipError("The zip is damaged or not a zip.");
     if (id === 0x0001) {
       let p = at + 4;
       const read = () => {
@@ -264,11 +257,7 @@ function safeNumber(value: bigint): number {
   return Number(value);
 }
 
-/**
- * The bytes as an ArrayBuffer (what Obsidian's `createBinary` takes),
- * without a copy when the array already spans its whole buffer, as an entry
- * from `readZipEntry` does; a view into a larger buffer is copied.
- */
+/** The bytes as an ArrayBuffer for Obsidian's createBinary, copying only when they're a view into a larger buffer. */
 export function wholeBuffer(bytes: Uint8Array): ArrayBuffer {
   const buffer = bytes.buffer;
   if (buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === buffer.byteLength) return buffer;
@@ -277,7 +266,7 @@ export function wholeBuffer(bytes: Uint8Array): ArrayBuffer {
 
 let crcTable: Uint32Array | null = null;
 
-/** CRC-32 (the zip/PNG one). */
+/** CRC-32 as used by zip. */
 export function crc32(bytes: Uint8Array): number {
   if (!crcTable) {
     crcTable = new Uint32Array(256);

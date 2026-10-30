@@ -1,10 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { deflateRawSync } from "node:zlib";
 import { parseJotExport } from "../src/format.ts";
 import {
-  crc32,
   isSafeEntryName,
   looksLikeZip,
   MOBILE_ZIP_LIMITS,
@@ -15,6 +14,7 @@ import {
   ZipError,
 } from "../src/zip.ts";
 import { openZipExport } from "../src/zip-export.ts";
+import { buildZip } from "./zip-builder.ts";
 
 /**
  * Real zips, made the way Jot makes them: `make-exports.py` lays out the
@@ -72,72 +72,6 @@ test("a scoped export's zip: a non-ASCII name, decomposed by macOS in the folder
 
 // ---- Zips built here, for what Jot never writes.
 
-interface Entry {
-  name: string;
-  data: Uint8Array | string;
-  stored?: boolean;
-  /** Overrides, to build a broken or hostile zip. */
-  size?: number;
-  crc?: number;
-  flags?: number;
-  zip64?: boolean;
-}
-
-/** A zip with a central directory, like any zip tool writes. */
-function buildZip(entries: Entry[]): Uint8Array {
-  const locals: Buffer[] = [];
-  const centrals: Buffer[] = [];
-  let offset = 0;
-  for (const e of entries) {
-    const bytes = typeof e.data === "string" ? Buffer.from(e.data, "utf8") : Buffer.from(e.data);
-    const packed = e.stored ? bytes : deflateRawSync(bytes);
-    const name = Buffer.from(e.name, "utf8");
-    const crc = e.crc ?? crc32(bytes);
-    const size = e.size ?? bytes.length;
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(e.flags ?? 0x0800, 6);
-    local.writeUInt16LE(e.stored ? 0 : 8, 8);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(packed.length, 18);
-    local.writeUInt32LE(size, 22);
-    local.writeUInt16LE(name.length, 26);
-    locals.push(local, name, packed);
-
-    const extra = e.zip64 ? Buffer.alloc(4 + 24) : Buffer.alloc(0);
-    if (e.zip64) {
-      extra.writeUInt16LE(0x0001, 0);
-      extra.writeUInt16LE(24, 2);
-      extra.writeBigUInt64LE(BigInt(size), 4);
-      extra.writeBigUInt64LE(BigInt(packed.length), 12);
-      extra.writeBigUInt64LE(BigInt(offset), 20);
-    }
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(e.flags ?? 0x0800, 8);
-    central.writeUInt16LE(e.stored ? 0 : 8, 10);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(e.zip64 ? 0xffffffff : packed.length, 20);
-    central.writeUInt32LE(e.zip64 ? 0xffffffff : size, 24);
-    central.writeUInt16LE(name.length, 28);
-    central.writeUInt16LE(extra.length, 30);
-    central.writeUInt32LE(e.zip64 ? 0xffffffff : offset, 42);
-    centrals.push(central, name, extra);
-    offset += 30 + name.length + packed.length;
-  }
-  const directory = Buffer.concat(centrals);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(directory.length, 12);
-  end.writeUInt32LE(offset, 16);
-  return new Uint8Array(Buffer.concat([...locals, directory, end]));
-}
-
 const EXPORT = [
   "<!-- jot:export v=1 date=2026-10-28T19:40:12Z -->",
   "",
@@ -161,6 +95,37 @@ test("stored entries, ZIP64 sizes and Finder's metadata files are read", async (
   assert.equal(opened.text, EXPORT);
   assert.deepEqual([...(await opened.read(opened.media.get("media/AAAA.png")!))], [1, 2, 3, 4, 5]);
   assert.equal(opened.onlyExport, false, "another file in the zip: it's kept after importing");
+});
+
+test("files in the media folder that no jot links to are counted, so the zip is kept", async () => {
+  const linked = await openZipExport(buildZip([{ name: "export/export.md", data: EXPORT }, { name: "export/media/AAAA.png", data: "png" }]));
+  assert.equal(linked.unlinked, 0);
+  const extra = await openZipExport(
+    buildZip([
+      { name: "export/export.md", data: EXPORT },
+      { name: "export/media/AAAA.png", data: "png" },
+      { name: "export/media/BBBB.png", data: "no jot links to me" },
+      // A link the parser can't use: only files directly in media/ are attachments.
+      { name: "export/media/sub/CCCC.png", data: "nested" },
+      { name: "export/media/.DS_Store", data: "Finder's" },
+    ]),
+  );
+  assert.equal(extra.onlyExport, true);
+  assert.equal(extra.unlinked, 2);
+  assert.deepEqual([...extra.media.keys()], ["media/AAAA.png"]);
+});
+
+test("a file name with spaces, brackets or an odd extension, as older Jot wrote them, still pairs with its file", async () => {
+  const names = ["11111111-2222-4333-8444-555555555555.tar gz", "22222222-2222-4333-8444-555555555555.we)ird", "33333333-2222-4333-8444-555555555555.a]b"];
+  const text = [
+    "<!-- jot:export v=1 -->",
+    '<!-- jot:category name="Files" -->',
+    `- backup [file: media/${names[0]}] and ![shot](media/${names[1]}) and [video: media/${names[2]}]`,
+    "<!-- /jot:category -->",
+  ].join("\n");
+  const zip = await openZipExport(buildZip([{ name: "export/export.md", data: text }, ...names.map((n) => ({ name: `export/media/${n}`, data: n }))]));
+  assert.deepEqual([...zip.media.keys()], names.map((n) => `media/${n}`));
+  assert.equal(zip.unlinked, 0);
 });
 
 test("zip slip: a path that climbs out of its folder refuses the whole zip", async () => {
@@ -229,6 +194,35 @@ test("an unpacked file is saved from its own buffer, not a copy", async () => {
   // A view into a larger buffer is copied, so nothing around it is saved.
   const view = new Uint8Array([9, 1, 2, 3, 9]).subarray(1, 4);
   assert.deepEqual([...new Uint8Array(wholeBuffer(view))], [1, 2, 3]);
+});
+
+test("a large entry unpacks in slices of the zip's own bytes, which stay as they were", async () => {
+  // Random bytes don't compress, so the packed entry is a few megabytes too.
+  const big = new Uint8Array(randomBytes(3 * 1024 * 1024 + 17));
+  const zip = buildZip([{ name: "export/export.md", data: EXPORT }, { name: "export/media/AAAA.png", data: big }]);
+  const copy = zip.slice();
+  const opened = await openZipExport(zip);
+  const entry = opened.media.get("media/AAAA.png")!;
+  assert.ok(entry.compressedSize > 2 * 1024 * 1024);
+  assert.deepEqual(await opened.read(entry), big);
+  assert.deepEqual(zip, copy, "nothing detached or changed");
+  assert.deepEqual(await opened.read(entry), big, "and it reads again");
+});
+
+test("a ZIP64 field longer than the extra data it's in is refused, not read from what follows", async () => {
+  // The field says 24 bytes but holds only the size; the packed size and offset that follow are in the comment.
+  const extra = new DataView(new ArrayBuffer(12));
+  extra.setUint16(0, 0x0001, true);
+  extra.setUint16(2, 24, true);
+  extra.setBigUint64(4, 1n, true);
+  const comment = new DataView(new ArrayBuffer(16));
+  comment.setBigUint64(0, 1n, true);
+  comment.setBigUint64(8, BigInt(30 + "export/export.md".length + Buffer.byteLength(EXPORT)), true);
+  const zip = buildZip([
+    { name: "export/export.md", data: EXPORT, stored: true },
+    { name: "export/media/AAAA.png", data: "x", stored: true, zip64: true, extra: new Uint8Array(extra.buffer), comment: new Uint8Array(comment.buffer) },
+  ]);
+  await rejects(zip, /damaged or not a zip/);
 });
 
 test("damaged and unsupported zips say why", async () => {

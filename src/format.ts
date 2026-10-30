@@ -1,39 +1,15 @@
 /*
- * The Jot export format and the note-insertion rules — pure functions, no
- * Obsidian imports, so they can be unit-tested with plain Node.
- *
- * The envelope is written by Jot's `ExportBuilder.ObsidianEnvelope`
- * (jot/Utility/ExportBuilder.swift). Change both sides together.
- *
- *   <!-- jot:export v=1 date=2026-09-14T10:22:05Z -->
- *   Stats: 3 jots across 2 categories          (optional, ignored)
- *   <!-- jot:category name="Ideas" id="0D4C…" -->
- *   - build the obsidian thing
- *   - rename the workspaces screen
- *   <!-- /jot:category -->
- *   <!-- jot:category name="Work" id="9A1E…" -->
- *   …
- *   <!-- /jot:category -->
- *
- * `name` is a JSON string literal. `id` is the category's UUID, written by
- * Jot 1.6 and later; 1.5 wrote `name` only, so it's optional. Attributes, in
- * the header and the category markers alike, may come in any order and
- * unknown ones are ignored, which is what lets the format grow without a
- * version bump. Everything outside a category block is ignored, so stats
- * lines, workspace headers and separators never reach a note.
- *
- * Jot doesn't escape jot text, so a jot can hold marker text itself. An
- * export whose markers don't pair up (or whose last category never ends, or
- * that has a category without a name) gets a `problem` and is not imported,
- * rather than losing the jots the markers would cut off.
+ * Jot's export format and the rules for inserting jots into a note. No Obsidian imports, so tests run in Node.
+ * A `<!-- jot:export v=1 -->` header, then `<!-- jot:category name="…" -->` … `<!-- /jot:category -->` blocks;
+ * text outside them is ignored. The Jot app writes this in ExportBuilder.swift; change both sides together.
  */
 
 export interface JotBlock {
-  /** The category name, exactly as Jot has it. */
   name: string;
-  /** The category's id, upper-case, or null for exports from before Jot 1.6. */
+  /** Upper-case UUID, or null for exports from Jot 1.5, which wrote no ids. */
   id: string | null;
-  /** The jots, formatted the way the user's export settings render them. */
+  /** The category's workspace in Jot; null when it has none, and in exports that don't say. */
+  workspace: string | null;
   body: string;
 }
 
@@ -41,34 +17,36 @@ export interface JotExport {
   version: number;
   date: string | null;
   blocks: JotBlock[];
-  /** Why importing this text could lose jots (one sentence), or null when it's sound. */
+  /** Why importing could lose jots (one sentence for the notice), or null. */
   problem: string | null;
 }
 
-export const SUPPORTED_VERSION = 1;
+const SUPPORTED_VERSION = 1;
 
+/** An attribute value: a JSON string literal or a bare token. */
 const VALUE = String.raw`"(?:[^"\\]|\\.)*"|[^\s"]+`;
 const KEY = "[A-Za-z0-9_-]+";
-const HEADER = new RegExp(String.raw`<!--\s*jot:export((?:\s+${KEY}=(?:${VALUE}))*)\s*-->`);
+// Inside a marker only spaces and tabs count as space: Jot escapes "<!--" before any whitespace and
+// "jot:", but JavaScript's \s also matches characters Swift's doesn't (U+FEFF).
+const HEADER = new RegExp(String.raw`<!--[ \t]*jot:export((?:[ \t]+${KEY}=(?:${VALUE}))*)[ \t]*-->`);
 const BLOCK = new RegExp(
-  String.raw`<!--\s*jot:category((?:\s+${KEY}=(?:${VALUE}))+)\s*-->\r?\n?([\s\S]*?)\r?\n?<!--\s*\/jot:category\s*-->`,
+  String.raw`<!--[ \t]*jot:category((?:[ \t]+${KEY}=(?:${VALUE}))+)[ \t]*-->\r?\n?([\s\S]*?)\r?\n?<!--[ \t]*\/jot:category[ \t]*-->`,
   "g",
 );
 const ATTRIBUTE = new RegExp(String.raw`(${KEY})=(${VALUE})`, "g");
-/** Any opening or closing marker, readable or not, to check that they pair up. */
-const OPEN = /<!--\s*jot:category\b/g;
-const CLOSE = /<!--\s*\/jot:category\s*-->/g;
+/** Every marker, readable or not, so markerProblem can check that they pair up. */
+const OPEN = /<!--[ \t]*jot:category\b/g;
+const CLOSE = /<!--[ \t]*\/jot:category[ \t]*-->/g;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Whether the text has a Jot export header with a version (in its first 512 chars). */
+/** Whether a versioned Jot export header appears in the first 512 characters. */
 export function isJotExport(text: string): boolean {
   return readHeader(text) !== null;
 }
 
 /**
- * Parse a Jot export. Returns null when the header is missing or from a
- * newer envelope version than this plugin understands. Blocks with an
- * empty body are dropped; anything that would drop jots is a `problem`.
+ * Null when the header is missing or newer than this plugin supports. Empty blocks are dropped; anything
+ * that would lose jots (unpaired markers, a nameless category) sets `problem` so the import is refused.
  */
 export function parseJotExport(text: string): JotExport | null {
   const header = readHeader(text);
@@ -88,22 +66,48 @@ export function parseJotExport(text: string): JotExport | null {
       continue;
     }
     const id = attributes.get("id");
-    blocks.push({ name, id: id !== undefined && UUID.test(id) ? id.toUpperCase() : null, body });
+    const workspace = attributes.get("workspace");
+    blocks.push({
+      name,
+      id: id !== undefined && UUID.test(id) ? id.toUpperCase() : null,
+      workspace: workspace !== undefined && workspace.trim().length > 0 ? workspace : null,
+      body,
+    });
   }
   return { version: header.version, date: header.date, blocks, problem: problem ?? markerProblem(text, matched) };
 }
 
 /**
- * Whether the text is an export and nothing else: the header comes first and
- * only blank lines follow the last category. Only such a file is trashed
- * after importing; a note the export was pasted into keeps its other text.
+ * Whether the text is the export and nothing else: the header first, then only what Jot writes between
+ * blocks, and blank lines after the last. Only such a file is trashed after import, so a note the export was
+ * pasted into, or one with notes typed between its blocks, is kept.
  */
 export function isWholeExport(text: string): boolean {
   const head = HEADER.exec(text.slice(0, 512));
   if (!head || text.slice(0, head.index).trim().length > 0) return false;
-  const closes = [...text.matchAll(CLOSE)];
-  const last = closes[closes.length - 1];
-  return last !== undefined && text.slice((last.index ?? 0) + last[0].length).trim().length === 0;
+  let at = head.index + head[0].length;
+  let blocks = 0;
+  for (const block of text.matchAll(BLOCK)) {
+    const start = block.index ?? 0;
+    if (!isJotGap(text.slice(at, start), blocks === 0)) return false;
+    at = start + block[0].length;
+    blocks++;
+  }
+  return blocks > 0 && text.slice(at).trim().length === 0;
+}
+
+/**
+ * Between blocks Jot writes blank lines and at most a workspace's name: a heading, or the name in capitals.
+ * Before the first block there can also be the "Stats:" line.
+ */
+function isJotGap(gap: string, first: boolean): boolean {
+  const lines = gap
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const rest = first && lines[0]?.startsWith("Stats: ") ? lines.slice(1) : lines;
+  if (rest.length === 0) return true;
+  return rest.length === 1 && (/^#{1,6}[ \t]+\S/.test(rest[0]) || rest[0] === rest[0].toUpperCase());
 }
 
 function readHeader(text: string): { version: number; date: string | null } | null {
@@ -115,7 +119,7 @@ function readHeader(text: string): { version: number; date: string | null } | nu
   return { version: Number(version), date: attributes.get("date") ?? null };
 }
 
-/** Null when every marker belongs to a category that was read, else what's wrong. */
+/** Null when every marker belongs to a parsed block, else why not (an older Jot let a jot contain marker text). */
 function markerProblem(text: string, matched: number): string | null {
   const opens = [...text.matchAll(OPEN)].map((m) => m.index ?? 0);
   const closes = [...text.matchAll(CLOSE)].map((m) => m.index ?? 0);
@@ -127,7 +131,7 @@ function markerProblem(text: string, matched: number): string | null {
     : "Its category markers don't pair up, maybe because a jot contains marker text.";
 }
 
-/** `key="json string"` or `key=bare` pairs; a quoted value that isn't valid JSON is dropped. */
+/** `key="json string"` or `key=bare` pairs in any order; callers ignore unknown keys so the format can grow. */
 function parseAttributes(source: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const [, key, raw] of source.matchAll(ATTRIBUTE)) {
@@ -140,45 +144,41 @@ function parseAttributes(source: string): Map<string, string> {
       const value: unknown = JSON.parse(raw);
       if (typeof value === "string") out.set(key, value);
     } catch {
-      // Not a string Jot wrote; leave the attribute out.
+      // Not valid JSON: leave the attribute out.
     }
   }
   return out;
 }
 
 /**
- * The note basename for a category. Obsidian refuses `* " \ / < > : | ?` in
- * file names and can't link to names holding `# ^ [ ]`, so those are
- * replaced or dropped. Path separators become "-" so "Work / Life" stays
- * one note rather than a folder. Leading dots go too (Obsidian hides such
- * files, so ".NET" would be written and then never found), Windows' device
- * names get a "_" (on every platform, so a synced vault agrees), and the
- * name stops at 200 bytes. Composed Unicode (NFC), like Obsidian's paths.
- *
- * A name that cleans to nothing ("?", "**", "...") is spelled out instead,
- * "Question mark", "Asterisk asterisk", "Dot dot dot": each such category
- * keeps a note of its own, the same one every time, rather than all of
- * them sharing "Untitled.md", Obsidian's name for any new note.
+ * A category's note basename, safe as an Obsidian file name and link target, at most 200 bytes. A name that
+ * cleans to nothing ("?") is spelled out ("Question mark") so each such category keeps a note of its own.
  */
 export function noteNameFor(category: string): string {
   const cleaned = clipBytes(
     category
       .normalize("NFC")
+      // "Work / Life" stays one note rather than a folder.
       .replace(/[\\/:]+/g, "-")
+      // Not allowed in file names, or breaks wikilinks.
       .replace(/[*"<>|?#^[\]]/g, "")
       .replace(/\s+/g, " ")
+      // Control characters: Windows refuses them, and they can't be seen.
+      .replace(/\p{Cc}/gu, "")
+      // Obsidian hides dotfiles, so ".NET" would be written and never shown.
       .replace(/^[. ]+/, "")
+      // Windows device names, changed on every platform so a synced vault agrees.
       .replace(/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?=\.|$)/i, "$1_"),
     200,
   ).replace(/[. ]+$/g, "");
   if (cleaned.length > 0) return cleaned;
   const spelled = [...category].flatMap((ch) => SYMBOL_NAMES[ch] ?? []).join(" ");
-  // Only blank names are left, and the parser refuses those.
+  // Only a blank name gets here, and the parser refuses those.
   if (spelled.length === 0) return "Unnamed category";
   return clipBytes(spelled[0].toUpperCase() + spelled.slice(1), 200).replace(/ +$/, "");
 }
 
-/** What noteNameFor calls each character it drops, for a name made of nothing else. */
+/** Spoken names for the characters noteNameFor drops. */
 const SYMBOL_NAMES: Record<string, string> = {
   "*": "asterisk",
   '"': "quote",
@@ -210,38 +210,48 @@ export type Position = "top" | "bottom";
 
 export interface InsertOptions {
   position: Position;
-  /** A heading to insert under; "" means the note itself. Leading #s set the level used when it has to be created (default 2). */
+  /** Heading to insert under, or "" for none. Leading #s set the level if it must be created (default 2). */
   heading: string;
+  /** Where to add a heading the note lacks: the end (default) or the top, right after the properties. */
+  newHeading?: Position;
+  /** Default 1. */
+  blankLinesBefore?: number;
+  /** Default 1. */
+  blankLinesAfter?: number;
+  /** A line above the jots, already filled in by fillMarker; "" for none. */
+  startMarker?: string;
+  endMarker?: string;
 }
 
 /**
- * Insert `chunk` into `existing` per the options and return the new note
- * text. The chunk is separated from its neighbours by one blank line.
- * "Top" means after frontmatter and after the note's title (see `isTitle`;
- * `noteName` is the note's file name without ".md"), or right under the
- * heading; "bottom" means the end of the note (or the end of that heading's
- * section). A missing heading is appended at the end of the note first. A
- * leading byte-order mark is dropped (see `withoutBom`).
+ * Returns `existing` with `chunk` inserted. Under a heading only when one is chosen: "top" is right under it, or
+ * with none, right after the properties; "bottom" is the end of the heading's section or of the note.
+ * A note with Windows line endings keeps them.
  */
-export function insertIntoNote(existing: string, chunk: string, opts: InsertOptions, noteName?: string): string {
+export function insertIntoNote(existing: string, chunk: string, opts: InsertOptions): string {
   const text = withoutBom(existing).replace(/\r\n/g, "\n");
-  const piece = closeFences(trimBlankLines(chunk.replace(/\r\n/g, "\n")));
-  if (piece.length === 0) return text;
+  const jots = closeFences(trimBlankLines(chunk.replace(/\r\n/g, "\n")));
+  let result = jots.length === 0 ? text : insertPiece(text, withMarkers(jots, opts), opts);
+  // A "---" marker line at the very top would read as frontmatter; a leading blank line prevents that.
+  if (frontmatterLength(text) === 0 && frontmatterLength(result) > 0) result = "\n" + result;
+  return existing.includes("\r\n") ? result.replace(/\n/g, "\r\n") : result;
+}
 
+function insertPiece(text: string, piece: string, opts: InsertOptions): string {
+  const above = blankLines(opts.blankLinesBefore);
+  const below = blankLines(opts.blankLinesAfter);
   const heading = parseHeadingSetting(opts.heading);
-  if (!heading) {
-    return opts.position === "top" ? insertAtTop(text, piece, noteName) : appendAtBottom(text, piece);
-  }
+  if (!heading) return opts.position === "top" ? insertAtTop(text, piece, "\n" + below) : appendAtBottom(text, piece, "\n" + above);
 
   const lines = text.length === 0 ? [] : text.split("\n");
-  // Headings are looked for below the properties only, and outside code.
+  // Only headings below the frontmatter and outside code count.
   const fm = frontmatterLength(text);
   const bodyStart = fm > 0 ? text.slice(0, fm).split("\n").length : 0;
   const { code } = codeLines(lines, bodyStart);
   const found = findHeading(lines, heading.text, bodyStart, code);
   if (!found) {
-    const headingLine = "#".repeat(heading.level) + " " + heading.text;
-    return appendAtBottom(text, headingLine + "\n\n" + piece);
+    const section = "#".repeat(heading.level) + " " + heading.text + "\n" + above + piece;
+    return opts.newHeading === "top" ? insertAtTop(text, section, "\n" + below) : appendAtBottom(text, section, "\n\n");
   }
 
   const sectionStart = found.end + 1;
@@ -258,38 +268,59 @@ export function insertIntoNote(existing: string, chunk: string, opts: InsertOpti
   const section = lines.slice(sectionStart, sectionEnd);
   const after = lines.slice(sectionEnd);
   const rawSection = section.join("\n");
-  // Keep the note's own blank line(s) after the heading, if it has any;
-  // a heading that had none stays tight, a new section gets one.
+  // Bottom keeps the section's own blank lines under the heading; top replaces them with the configured ones.
   const leadingBlank = /^(?:[ \t]*\n)+/.exec(rawSection)?.[0] ?? "";
   const sectionText = trimBlankLines(rawSection);
 
   let newSection: string;
+  let next = below;
   if (sectionText.length === 0) {
-    newSection = (leadingBlank || "\n") + piece;
+    newSection = above + piece;
   } else if (opts.position === "top") {
-    newSection = leadingBlank + piece + "\n\n" + sectionText;
+    newSection = above + piece + "\n" + below + sectionText;
+    next = "\n";
   } else {
-    newSection = leadingBlank + sectionText + "\n\n" + piece;
+    newSection = leadingBlank + sectionText + "\n" + above + piece;
   }
 
   const parts: string[] = [before.join("\n"), newSection];
-  if (after.length > 0) parts.push("", after.join("\n"));
+  if (after.length > 0) parts.push(next + after.join("\n"));
   return ensureTrailingNewline(parts.join("\n"));
 }
 
+/** `count` blank lines (default 1) as line breaks, on top of the one that ends the line above. */
+function blankLines(count: number | undefined): string {
+  const n = count === undefined || !Number.isFinite(count) ? 1 : Math.min(Math.max(Math.round(count), 0), 9);
+  return "\n".repeat(n);
+}
+
+/** A blank line separates each marker from the jots so Markdown doesn't merge them into one paragraph. */
+function withMarkers(jots: string, opts: InsertOptions): string {
+  const start = (opts.startMarker ?? "").trim();
+  const end = (opts.endMarker ?? "").trim();
+  return [start, jots, end].filter((part) => part.length > 0).join("\n\n");
+}
+
 /**
- * The note's text without a leading byte-order mark (U+FEFF, which some
- * editors write first). Obsidian passes the mark through, and with it in
- * front neither the properties check here nor Obsidian's own property
- * editing sees the properties: "top" would land above them and a new link
- * would add a second block. Dropped, not kept, so both agree; in UTF-8 the
- * mark says nothing.
+ * Fills `{{date}}` and `{{time}}` in a marker line via `format`, with an optional moment.js pattern
+ * (`{{date:YYYY-MM-DD}}`). Line breaks become spaces, since a marker is one line.
+ */
+export function fillMarker(template: string, format: (kind: "date" | "time", pattern: string | null) => string): string {
+  return template
+    .replace(/\{\{\s*(date|time)\s*(?::([^}]*))?\}\}/gi, (_, kind: string, pattern: string | undefined) =>
+      format(kind.toLowerCase() as "date" | "time", pattern?.trim() || null),
+    )
+    .replace(/\s*\n\s*/g, " ")
+    .trim();
+}
+
+/**
+ * Drops a leading byte-order mark. Obsidian passes it through, and with it in front neither this file nor
+ * Obsidian's property editor sees the frontmatter, so "top" would land above it.
  */
 export function withoutBom(text: string): string {
   return text.startsWith("\uFEFF") ? text.slice(1) : text;
 }
-
-// MARK: - Helpers
 
 function trimBlankLines(s: string): string {
   return s.replace(/^(?:[ \t]*\n)+/, "").replace(/\s+$/, "");
@@ -299,68 +330,27 @@ function ensureTrailingNewline(s: string): string {
   return s.endsWith("\n") ? s : s + "\n";
 }
 
-function appendAtBottom(text: string, piece: string): string {
-  // A note that is only frontmatter (a new linked note): go right under it.
+/** `gap` is the line breaks between the note's text and `piece`. */
+function appendAtBottom(text: string, piece: string, gap: string): string {
+  // A note that is only frontmatter (a newly linked note) gets the jots right below it.
   const fm = frontmatterLength(text);
-  if (fm > 0 && text.slice(fm).trim().length === 0) return insertAtTop(text, piece, undefined);
+  if (fm > 0 && text.slice(fm).trim().length === 0) return insertAtTop(text, piece, gap);
   const body = text.replace(/\s+$/, "");
-  return ensureTrailingNewline(body.length === 0 ? piece : body + "\n\n" + piece);
+  return ensureTrailingNewline(body.length === 0 ? piece : body + gap + piece);
 }
 
-function insertAtTop(text: string, piece: string, noteName: string | undefined): string {
+/** Right after the properties. `below` is the line breaks between `piece` and the rest of the note. */
+function insertAtTop(text: string, piece: string, below: string): string {
   const fm = frontmatterLength(text);
   const front = text.slice(0, fm);
   const rest = trimBlankLines(text.slice(fm));
-  // A note that opens with a "# Title" keeps it first: the jots go under
-  // the title, not above it (since 1.1, when "top" became the default).
-  const firstLine = rest.split("\n", 1)[0];
-  const title = isTitle(firstLine, rest, piece, noteName) ? firstLine : null;
-  const after = title === null ? rest : trimBlankLines(rest.slice(firstLine.length));
-  const below = after.length === 0 ? piece : piece + "\n\n" + after;
-  const body = title === null ? below : title + "\n\n" + below;
+  const body = rest.length === 0 ? piece : piece + below + rest;
   return ensureTrailingNewline(front.length === 0 ? body : front + "\n" + body);
 }
 
 /**
- * Whether `line`, the first line of the note's `body` (below its
- * properties), is the note's title, which "top" keeps first. It is when
- * it's a `# ` heading and either
- *
- * - its text is the note's name ("# Ideas" in Ideas.md), or
- * - it's the only `# ` heading around: the rest of the note has none, and
- *   neither do the jots coming in.
- *
- * A jot can write `# ` headings itself: Jot's timestamp prefix set to "# ",
- * with group by date, starts each day's jots with "# Oct 28, 2026" (or a
- * jot's own text has one). When the jots coming in have such a heading, or
- * the note has more than one, its first `# ` heading was most likely written
- * by an earlier import, and going below it would put the new jots, and
- * their own heading, between that heading and its jots. So then the jots
- * go at the very top, unless the heading has the note's name.
- */
-function isTitle(line: string, body: string, piece: string, noteName: string | undefined): boolean {
-  if (headingLevel(line) !== 1) return false;
-  if (noteName !== undefined && sameName(headingText(line), noteName)) return true;
-  return levelOneHeadings(body) === 1 && levelOneHeadings(piece) === 0;
-}
-
-/** How many `# ` headings the text has outside code. */
-function levelOneHeadings(text: string): number {
-  const lines = text.split("\n");
-  const { code } = codeLines(lines, 0);
-  return lines.filter((line, i) => !code[i] && headingLevel(line) === 1).length;
-}
-
-/** Whether a heading names the note: the same text, or the name its text would get as a note ("Work / Life" is Work - Life.md). */
-function sameName(heading: string, noteName: string): boolean {
-  const name = noteName.normalize("NFC").toLowerCase();
-  return heading.normalize("NFC").toLowerCase() === name || noteNameFor(heading).toLowerCase() === name;
-}
-
-/**
- * Length of a leading YAML frontmatter block including its closing line (0
- * if none), by Obsidian's own rule: `---` alone on the first line and alone
- * on a later one. "..." or "--- " don't close it.
+ * Length of the leading frontmatter including its closing line, or 0. Obsidian's rule: `---` alone on the
+ * first line and alone on a later one ("..." and "--- " don't close it).
  */
 function frontmatterLength(text: string): number {
   if (!text.startsWith("---\n")) return 0;
@@ -371,10 +361,8 @@ function frontmatterLength(text: string): number {
 }
 
 /**
- * Which lines (from `start` on) are fenced code, fences included, and the
- * fence still open after the last line, if any. A fence closes only with
- * the same character, at least as many of them, and nothing else on the
- * line, so ~~~ inside a ``` block is still code.
+ * Which lines from `start` on are fenced code (fences included), and the fence left open at the end, if any.
+ * A fence closes only with the same character, at least as many, and nothing after.
  */
 function codeLines(lines: string[], start: number): { code: boolean[]; open: { fence: string; indent: string } | null } {
   const code = lines.map(() => false);
@@ -385,7 +373,7 @@ function codeLines(lines: string[], start: number): { code: boolean[]; open: { f
       code[i] = true;
       if (m && m[2][0] === open.fence[0] && m[2].length >= open.fence.length && m[3].trim().length === 0) open = null;
     } else if (m && !(m[2][0] === "`" && m[3].includes("`"))) {
-      // (A ``` line with a ` after it is inline code, not a fence.)
+      // A ``` line with another ` after it is inline code, not a fence.
       code[i] = true;
       open = { fence: m[2], indent: m[1] };
     }
@@ -394,11 +382,8 @@ function codeLines(lines: string[], start: number): { code: boolean[]; open: { f
 }
 
 /**
- * `piece` with a closing fence added when a code fence in it never closes
- * (a jot like "look:\n```\ncode"). Left open, it would turn the rest of the
- * note into code, and a later import under a heading would miss the next
- * heading. Closed with the opening's characters and indent, so a fence
- * inside a list item closes there.
+ * Closes a fence the jots leave open, which would turn the rest of the note into code and hide its headings.
+ * Uses the opening's indent so a fence inside a list item closes there.
  */
 function closeFences(piece: string): string {
   const { open } = codeLines(piece.split("\n"), 0);
@@ -418,56 +403,42 @@ function headingText(line: string): string {
 }
 
 /**
- * The heading that starts at line `i`, or null: outside code, from `start`
- * (the first line below the properties) on, an ATX heading ("## Inbox") or
- * a setext one ("Inbox" with a line of = or - right below, levels 1 and 2),
- * which Obsidian indexes too. `end` is the heading's last line.
- *
- * Setext headings are only taken in their plain form, the one Obsidian
- * always reads as a heading: a single unindented line of text, first in
- * the note or after a blank line, that starts no other block (a list item,
- * quote, table row, HTML, math or code). "- item" over "---" is a list and
- * a rule, and a line inside a list item or quote isn't a heading of the
- * note. Anything else is left as it was before: not a heading.
+ * The ATX or setext heading starting at line `i`, or null; `end` is its last line. Setext headings count only in
+ * the form Obsidian always reads as one: a single plain paragraph line, first or after a blank line.
  */
 function headingAt(lines: string[], i: number, start: number, code: boolean[]): { level: number; text: string; end: number } | null {
   if (code[i]) return null;
   const level = headingLevel(lines[i]);
   if (level !== null) return { level, text: headingText(lines[i]), end: i };
-  // Obsidian's parser takes only an underline of = or - from the line's start to its end (no indent, no trailing space).
+  // Obsidian only takes an underline with no indent and no trailing spaces.
   const underline = i + 1 < lines.length && !code[i + 1] ? /^(=+|-+)$/.exec(lines[i + 1]) : null;
   if (!underline || (i > start && lines[i - 1].trim().length > 0 && !code[i - 1]) || !isPlainTextLine(lines[i])) return null;
   return { level: underline[1][0] === "=" ? 1 : 2, text: lines[i].trim(), end: i + 1 };
 }
 
-/** An unindented line that starts a paragraph, not another kind of block. */
+/** An unindented line that starts a paragraph: not a list item, quote, table row, HTML, fence, rule, math or comment. */
 function isPlainTextLine(line: string): boolean {
   if (!/^\S/.test(line) || line.includes("|")) return false;
   return !/^(?:#|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|>|<|`{3,}|~{3,}|[-=_*]+\s*$|\$\$|%%)/.test(line);
 }
 
-function findHeading(lines: string[], text: string, start: number, code: boolean[]): { index: number; level: number; end: number } | null {
+function findHeading(lines: string[], text: string, start: number, code: boolean[]): { level: number; end: number } | null {
   const wanted = text.toLowerCase();
   for (let i = start; i < lines.length; i++) {
     const heading = headingAt(lines, i, start, code);
-    if (heading !== null && heading.text.toLowerCase() === wanted) return { index: i, level: heading.level, end: heading.end };
+    if (heading !== null && heading.text.toLowerCase() === wanted) return { level: heading.level, end: heading.end };
   }
   return null;
 }
 
-/** The heading a heading setting names, without the #s that set its level ("### Inbox" is "Inbox"); "" for none. */
+/** A heading setting's text without its level ("### Inbox" is "Inbox"), or "" for none. */
 export function headingName(setting: string): string {
   return parseHeadingSetting(setting)?.text ?? "";
 }
 
 /**
- * What a heading typed (or picked) in the dialog means, given the note's
- * headings as Obsidian indexed them (their text, with no #s for the level).
- * Text that is exactly one of them, case aside, is that heading, even when
- * it starts with "#" ("#1 picks", from `## #1 picks`): its
- * setting then has the level in front ("## #1 picks"), so the "#"
- * isn't read as a level marker. Anything else is kept as typed, so
- * "### Inbox" still sets the level of a heading that isn't there yet.
+ * Resolves dialog input against the note's headings. An exact match is that heading even if it starts with "#"
+ * ("#1 picks"), so its setting gets a level prefix ("## #1 picks"); anything else is kept as typed.
  */
 export function headingSettingFor(
   typed: string,
@@ -484,11 +455,7 @@ export function headingSettingFor(
   return { setting: raw, name, existing: name.length > 0 && headings.some((h) => h.heading.trim().toLowerCase() === wanted) };
 }
 
-/**
- * The text to show in the dialog's Heading box for a saved setting: its
- * heading without the level ("## Inbox" shows "Inbox"), unless that text
- * would be read as another heading ("## #1 picks" shows as it is).
- */
+/** The dialog's Heading box text for a setting: "## Inbox" shows "Inbox", but "## #1 picks" stays whole to round-trip. */
 export function headingInputValue(setting: string): string {
   const name = headingName(setting);
   return headingName(name) === name ? name : setting.trim();

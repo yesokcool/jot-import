@@ -1,10 +1,13 @@
-/* Jot Import: the "choose notes" dialogs and the new-export notice.
-   Obsidian's CSS variables only, so every theme, light and dark, applies. */
+/* Only Obsidian's CSS variables, so every theme applies. */
 
-/* The title says what the dialog is for: bigger, in the accent color. */
 .jot-import-link-modal .modal-title {
   font-size: var(--font-ui-large);
   color: var(--text-accent);
+}
+
+/* Wider than Obsidian's default so long paths fit; phones keep the full-width sheet. */
+body:not(.is-phone) .modal.jot-import-link-modal {
+  --dialog-width: 700px;
 }
 
 /* Phones cut a modal title to one line; this one wraps instead. */
@@ -27,118 +30,197 @@
 
 .jot-import-link-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--size-4-3);
-  padding: var(--size-4-3) 0;
+  padding: var(--size-4-2) 0;
 }
 
 .jot-import-link-row + .jot-import-link-row {
   border-top: 1px solid var(--background-modifier-border);
 }
 
-.jot-import-link-info {
-  flex: 1 1 auto;
-  min-width: 0;
+/* Already linked categories, after the new ones: a small label, or a disclosure row when folded away. */
+.jot-import-linked {
+  border-top: 1px solid var(--background-modifier-border);
 }
 
-/* "Ideas → Dev.md › Inbox": the category, then where it goes, which is what
-   the dialog is about, in the accent color. */
+.jot-import-link-row + .jot-import-linked {
+  margin-top: var(--size-4-2);
+}
+
+.jot-import-linked-label {
+  padding: var(--size-4-2) 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+}
+
+summary.jot-import-linked-label {
+  cursor: pointer;
+}
+
+.jot-import-linked-label + .jot-import-link-row {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+/* One line per row, so every row is the same height. */
 .jot-import-link-line {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
-  flex-wrap: wrap;
   align-items: baseline;
   column-gap: var(--size-4-2);
-  row-gap: var(--size-2-1);
   font-size: var(--font-ui-medium);
   line-height: var(--line-height-tight);
+  white-space: nowrap;
 }
 
 .jot-import-link-category {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--text-normal);
   font-weight: var(--font-medium);
 }
 
+.jot-import-link-workspace {
+  color: var(--text-muted);
+  font-weight: var(--font-normal);
+}
+
 .jot-import-link-arrow {
+  flex: none;
   color: var(--text-faint);
 }
 
-.jot-import-link-note {
-  color: var(--text-accent);
-  font-weight: var(--font-semibold);
-  word-break: break-word;
-}
-
-.jot-import-link-heading {
-  color: var(--text-accent);
-  word-break: break-word;
-}
-
-.jot-import-target {
+.jot-import-link-dest {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
   display: flex;
-  align-items: flex-start;
-  gap: var(--size-4-1);
-  margin-top: var(--size-4-1);
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  word-break: break-word;
+  align-items: baseline;
+  column-gap: var(--size-4-1);
+  color: var(--text-accent);
+  cursor: pointer;
+  border-radius: var(--radius-s);
 }
 
-.jot-import-target-icon {
+.jot-import-link-dest:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+}
+
+.jot-import-link-dest:hover .jot-import-link-path,
+.jot-import-link-dest:hover .jot-import-link-choose {
+  text-decoration: underline;
+}
+
+.jot-import-link-choose {
+  font-weight: var(--font-semibold);
+}
+
+.jot-import-link-chevron {
   display: inline-flex;
-  flex-shrink: 0;
+  flex: none;
+  align-self: center;
+  --icon-size: var(--icon-xs);
+}
+
+.jot-import-link-path {
+  flex: 0 1 auto;
+  min-width: 3em;
+  font-weight: var(--font-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Right to left puts the ellipsis at the start. */
+.jot-import-link-path.is-cut-start {
+  direction: rtl;
+  text-align: left;
+}
+
+/* Middle cuts are measured in code (fitMiddle) with this hidden ruler. */
+.jot-import-link-path.is-cut-middle {
+  position: relative;
+}
+
+.jot-import-path-ruler {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  white-space: nowrap;
+}
+
+.jot-import-link-new {
+  flex: none;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.jot-import-link-row .jot-import-menu-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-2);
+}
+
+/* One width for every row's heading, so they line up in a column. */
+.jot-import-link-row .jot-import-heading-button {
+  width: 9.5em;
+  flex: none;
+}
+
+.jot-import-menu-button .jot-import-button-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jot-import-heading-button.is-none .jot-import-button-text {
+  color: var(--text-muted);
+}
+
+.jot-import-menu-button .jot-import-button-chevron {
+  display: inline-flex;
+  flex: none;
+  margin-left: auto;
   color: var(--text-faint);
   --icon-size: var(--icon-xs);
-  padding-top: 1px;
 }
 
-.jot-import-target-new {
-  color: var(--text-faint);
-}
-
-.jot-import-chips {
-  display: flex;
+/* Phones put the heading under the note, so the path gets the full width. */
+.is-phone .jot-import-link-row {
   flex-wrap: wrap;
-  align-items: center;
-  gap: var(--size-4-1);
-  margin-top: var(--size-4-2);
+  row-gap: var(--size-4-2);
 }
 
-.jot-import-chips-label {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  margin-right: var(--size-2-1);
+.is-phone .jot-import-link-line {
+  flex-basis: 100%;
 }
 
-/* Accent-tinted, so the one-tap alternatives stand out from the text.
-   Tinted with the text's own accent, which some themes set apart from the
-   button accent. */
-.jot-import-chips .jot-import-chip {
-  height: auto;
-  padding: 2px var(--size-4-2);
-  font-size: var(--font-ui-smaller);
-  border-radius: var(--radius-l);
-  color: var(--text-accent);
-  background-color: color-mix(in srgb, var(--text-accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--text-accent) 35%, transparent);
-  box-shadow: none;
+.is-phone .jot-import-link-row .jot-import-heading-button {
+  width: auto;
+  max-width: 100%;
 }
 
-.jot-import-chips .jot-import-chip:hover {
-  color: var(--text-accent-hover);
-  background-color: color-mix(in srgb, var(--text-accent) 22%, transparent);
-}
-
-.jot-import-link-row .jot-import-change {
-  flex-shrink: 0;
-}
-
-/* Obsidian zeroes a modal setting's padding when it's its parent's last
-   child, which the buttons row is. */
+/* Obsidian zeroes the padding of a modal's last setting, which this row is. */
 .jot-import-link-buttons {
   padding-top: var(--size-4-4);
 }
 
-/* The "Change" dialog: what the typed note and heading will be. */
+/* Grey when disabled, since a dimmed accent still looks ready. */
+.jot-import-link-buttons button.mod-cta:disabled {
+  background-color: var(--interactive-normal);
+  color: var(--text-faint);
+}
+
+/* The dialog holds focus while a row still needs a note (see `open`). */
+.modal.jot-import-link-modal:focus {
+  outline: none;
+}
+
 .jot-import-destination-status {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
@@ -167,12 +249,4 @@
   display: flex;
   gap: var(--size-4-2);
   margin-top: var(--size-4-2);
-}
-
-/* Phones: the button goes under the row's text instead of squeezing it. */
-@media (max-width: 480px) {
-  .jot-import-link-row {
-    flex-direction: column;
-    gap: var(--size-4-2);
-  }
 }

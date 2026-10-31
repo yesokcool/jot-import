@@ -10,10 +10,32 @@ body:not(.is-phone) .modal.jot-import-link-modal {
   --dialog-width: 700px;
 }
 
-/* Phones cut a modal title to one line; this one wraps instead. */
-.is-phone .jot-import-link-modal .modal-title {
+/* Phones center a modal title on one line; these wrap and start at the left like their text, clear of the close button. */
+.is-phone .jot-import-link-modal .modal-title,
+.is-phone .jot-import-destination-modal .modal-title {
   white-space: normal;
   text-overflow: clip;
+  text-align: start;
+  max-width: none;
+  margin-inline: 0;
+  padding-inline-end: var(--touch-size-m);
+}
+
+/* The header's inset matches the content's, so the title lines up with the text under it, and sits close above it. */
+.is-phone .jot-import-link-modal .modal-header,
+.is-phone .jot-import-destination-modal .modal-header {
+  padding-inline-start: var(--size-4-4);
+  padding-bottom: var(--size-4-1);
+}
+
+/* A centered dialog this tall reached under the status bar and the Dynamic Island. Kept a safe-area's height
+   clear above and below, with a shorter list that scrolls. */
+.is-phone .modal.jot-import-link-modal {
+  max-height: calc(100vh - 2 * var(--safe-area-inset-top) - var(--size-4-4));
+}
+
+.is-phone .jot-import-link-list {
+  max-height: 45vh;
 }
 
 .jot-import-link-modal .jot-import-lede {
@@ -259,6 +281,8 @@ summary.jot-import-linked-label {
 .is-phone .jot-import-link-row {
   flex-wrap: wrap;
   row-gap: var(--size-4-2);
+  /* A little more room between rows than on desktop, since each row is two lines. */
+  padding: calc(var(--size-4-2) + 6px) 0;
 }
 
 .is-phone .jot-import-link-line {

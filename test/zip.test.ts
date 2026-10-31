@@ -84,6 +84,13 @@ async function rejects(zip: Uint8Array, message: RegExp) {
   await assert.rejects(openZipExport(zip), (e: unknown) => e instanceof ZipError && message.test(e.message));
 }
 
+test("a zip without an Obsidian Format export says which kind of zip it is", async () => {
+  await rejects(buildZip([{ name: "jot-data.json", data: "{}" }, { name: "media/AAAA.png", data: "png" }]), /All My Data export/);
+  await rejects(buildZip([{ name: "Work Jots/Work Jots.txt", data: "Work\n- a\n" }]), /no Obsidian Format markers/);
+  await rejects(buildZip([{ name: "jot-export-2026-10-30-2200/jot-export-2026-10-30-2200.md", data: "# Work\n- a\n" }]), /no Obsidian Format markers/);
+  await rejects(buildZip([{ name: "photo.png", data: "png" }]), /no Jot export in the zip/);
+});
+
 test("stored entries, ZIP64 sizes and Finder's metadata files are read", async () => {
   const zip = buildZip([
     { name: "__MACOSX/export/._export.md", data: "mac metadata" },

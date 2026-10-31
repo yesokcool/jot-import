@@ -4,7 +4,7 @@
  */
 
 import { isJotExport } from "./format.ts";
-import type { MediaSource } from "./importer.ts";
+import { looksLikeExportName, type MediaSource } from "./importer.ts";
 import { mediaRefs } from "./media.ts";
 import { canInflate, readZipDirectory, readZipEntry, ZIP_LIMITS, type ZipEntry, ZipError, type ZipLimits } from "./zip.ts";
 
@@ -62,8 +62,23 @@ export async function openZipExport(data: Uint8Array, limits: ZipLimits = ZIP_LI
       read: (e) => readZipEntry(data, e),
     };
   }
+  // Say which kind of zip it is instead, so the fix is clear: both of Jot's zips are named "jot-export-…".
+  if (entries.some((e) => /(^|\/)jot-data\.json$/i.test(e.name))) throw new ZipError(ALL_MY_DATA);
+  if (entries.some((e) => /\.(md|txt)$/i.test(e.name) && looksLikeExportName(baseName(e.name)))) throw new ZipError(NOT_OBSIDIAN_FORMAT);
   throw new ZipError("There's no Jot export in the zip.");
 }
+
+/** "Work Jots/Work Jots.txt" → "Work Jots". */
+function baseName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1).replace(/\.[^.]*$/, "");
+}
+
+/** Settings ▸ Export All My Data also writes a "jot-export-….zip", holding `jot-data.json`. */
+export const ALL_MY_DATA = "This zip is Jot's All My Data export. Jot Import needs an export from Jot's Export screen with Obsidian Format turned on.";
+
+/** A Jot export without the Obsidian Format markers: a .txt, or a .md from a plain export. */
+export const OBSIDIAN_FORMAT_HINT = "Turn on Obsidian Format in Jot's Export ▸ Format and export again.";
+export const NOT_OBSIDIAN_FORMAT = `The Jot export inside has no Obsidian Format markers. ${OBSIDIAN_FORMAT_HINT}`;
 
 /** The import's view of a zip's attachments. */
 export function zipMedia(zip: ZipExport): MediaSource {

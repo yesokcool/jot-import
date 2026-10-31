@@ -40,7 +40,7 @@ import {
 } from "./routing.ts";
 import { JotImportSettingTab } from "./settings.ts";
 import { looksLikeZip, MOBILE_ZIP_LIMITS, wholeBuffer, ZIP_LIMITS, ZipError, type ZipLimits } from "./zip.ts";
-import { openZipExport, type ZipExport, zipMedia } from "./zip-export.ts";
+import { OBSIDIAN_FORMAT_HINT, openZipExport, type ZipExport, zipMedia } from "./zip-export.ts";
 
 export default class JotImportPlugin extends Plugin {
   settings: JotImportSettings = { ...DEFAULT_SETTINGS };
@@ -345,7 +345,7 @@ export default class JotImportPlugin extends Plugin {
     if (file.extension === "zip") return this.importVaultZip(file);
     const text = await this.app.vault.read(file);
     if (!isJotExport(text)) {
-      new Notice(`${file.name} is not a Jot export.`);
+      new Notice(notExportText(file.name));
       return;
     }
     const imported = await this.importOnce(text, { path: file.path, name: file.path });
@@ -392,7 +392,8 @@ export default class JotImportPlugin extends Plugin {
       return;
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
-    if (!looksLikeZip(bytes)) {
+    // A .zip always goes the zip way, so one that can't be read says why instead of being read as text.
+    if (!looksLikeZip(bytes) && !/\.zip$/i.test(file.name)) {
       await this.importOnce(new TextDecoder("utf-8").decode(bytes), { path: null, name: file.name });
       return;
     }
@@ -426,7 +427,7 @@ export default class JotImportPlugin extends Plugin {
       new Notice(
         isJotExport(text)
           ? "This Jot export is from a newer version of Jot. Update Jot Import to import it."
-          : "That file isn't a Jot export.",
+          : notExportText(origin.name),
       );
       return null;
     }
@@ -641,6 +642,11 @@ function isExportExtension(file: TFile): boolean {
 /** Compared between two looks at a file to tell whether it changed. */
 function stampOf(file: TFile): string {
   return `${file.stat.size}:${file.stat.mtime}`;
+}
+
+/** For a file that isn't an export Jot Import can read. It may still be a Jot export, made without Obsidian Format. */
+function notExportText(name: string): string {
+  return `Jot Import can't read ${name} because it has no Obsidian Format markers. ${OBSIDIAN_FORMAT_HINT}`;
 }
 
 function zipProblem(name: string, e: unknown): string {

@@ -51,7 +51,6 @@ export class LinkModal extends Modal {
   /** Keyed by category id. A row without an entry still needs a note. */
   private choices = new Map<string, LinkChoice>();
   private linkButton: HTMLButtonElement | null = null;
-  private status: HTMLElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private done = false;
   private linked: LinkRequest[];
@@ -97,10 +96,7 @@ export class LinkModal extends Modal {
       this.setTitle(count === 1 ? "Choose an Obsidian note for 1 category" : `Choose Obsidian notes for ${count} categories`);
       contentEl.createEl("p", {
         cls: "jot-import-lede",
-        text:
-          count === 1
-            ? "A category with the same name as a note will select that note automatically. Your choice is saved for future imports. To change it later, navigate to Jot Import's settings."
-            : "Categories with the same name as notes will select that note automatically. Your choices are saved for future imports. To change it later, navigate to Jot Import's settings.",
+        text: "Obsidian notes have been automatically selected based on category names. Adjust as needed. Your choices will be saved for future imports. You can always change the links in the Jot Import settings.",
       });
     }
 
@@ -128,7 +124,7 @@ export class LinkModal extends Modal {
     this.resizeObserver.observe(list);
     for (const section of list.findAll(".jot-import-linked")) this.resizeObserver.observe(section);
 
-    const buttons = new Setting(contentEl)
+    new Setting(contentEl)
       .setClass("jot-import-link-buttons")
       .addButton((btn) => btn.setButtonText("Cancel").onClick(() => this.close()))
       .addButton((btn) => {
@@ -142,17 +138,13 @@ export class LinkModal extends Modal {
             this.close();
           });
       });
-    this.status = buttons.descEl;
     this.updateLinkButton();
   }
 
+  /** Import waits until every new category has a note; its rows say "Choose a note", so nothing more is said. */
   private updateLinkButton() {
     if (!this.linkButton) return;
-    const missing = this.requests.filter((r) => !this.choices.has(r.block.id)).map((r) => r.block.name);
-    this.linkButton.disabled = missing.length > 0;
-    this.status?.setText(
-      missing.length === 0 ? "" : missing.length === 1 ? `Choose an Obsidian note for ${missing[0]}.` : `Choose Obsidian notes for ${missing.length} categories.`,
-    );
+    this.linkButton.disabled = this.requests.some((r) => !this.choices.has(r.block.id));
   }
 
   /**

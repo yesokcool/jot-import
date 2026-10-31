@@ -450,7 +450,7 @@ export default class JotImportPlugin extends Plugin {
     const exclude = new Set(origin.path !== null ? [origin.path] : []);
     const folders = this.app.vault.getAllFolders(false).map((f) => f.path);
     // One time for the whole import, so every note's start line agrees.
-    const now = moment();
+    const now = (moment as unknown as MomentNow)();
     const fill = (template: string) => fillMarker(template, (kind, pattern) => now.format(pattern ?? (kind === "date" ? "LL" : "LT")));
     const outcome = await importExport({
       parsed,
@@ -628,6 +628,12 @@ function offerLimit(file: TFile): number {
 }
 
 const UNZIP_TO_LIST = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * The part of Obsidian's moment used here. Obsidian's types get moment's from the moment package, which the
+ * community directory's review can't resolve, so it flagged every use as unsafe.
+ */
+type MomentNow = () => { format(pattern: string): string };
 
 /** Lower limits on mobile, which has less memory. */
 function zipLimits(): ZipLimits {

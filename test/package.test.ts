@@ -41,6 +41,4 @@ test("versions.json lists released versions only, oldest first, up to the manife
   const order = (a: string, b: string) => parts(a).reduce((d, n, i) => d || n - parts(b)[i], 0);
   assert.deepEqual([...keys].sort(order), keys, "oldest first");
   assert.equal(keys[keys.length - 1], manifest.version, "ends at the manifest's version");
-  // 1.0.1 and 1.0.2 were version bumps that were never published as releases.
-  assert.ok(!keys.includes("1.0.1") && !keys.includes("1.0.2"));
 });

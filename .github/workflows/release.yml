@@ -47,7 +47,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
+          # The release's description is RELEASE_NOTES.md: write it for each version before tagging.
           gh release create "$tag" \
             --title="$tag" \
+            --notes-file RELEASE_NOTES.md \
             --draft \
             main.js manifest.json styles.css

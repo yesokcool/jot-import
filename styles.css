@@ -146,7 +146,7 @@ summary.jot-import-linked-label {
   min-width: 0;
   display: flex;
   align-items: baseline;
-  column-gap: var(--size-4-2);
+  gap: var(--size-4-2);
   font-size: var(--font-ui-medium);
   line-height: var(--line-height-tight);
   white-space: nowrap;
@@ -177,7 +177,7 @@ summary.jot-import-linked-label {
   overflow: hidden;
   display: flex;
   align-items: baseline;
-  column-gap: var(--size-4-1);
+  gap: var(--size-4-1);
   color: var(--text-accent);
   cursor: pointer;
   border-radius: var(--radius-s);

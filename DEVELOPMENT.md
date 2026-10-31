@@ -151,15 +151,17 @@ repository.
 
 1. If the release needs a newer Obsidian API, raise `minAppVersion` in
    `manifest.json` first.
-2. Run `npm version x.y.z`. It runs `version-bump.mjs`, which copies the
+2. Write `RELEASE_NOTES.md`: what changed, in a sentence or a short list. It
+   becomes the release's description, which the directory shows.
+3. Run `npm version x.y.z`. It runs `version-bump.mjs`, which copies the
    version into `manifest.json` and adds it to `versions.json`, then commits
    and tags `x.y.z`. The tag has no `v` (`.npmrc`), because Obsidian needs it
    to equal the manifest version.
-3. Run `git push && git push --tags`. The tag starts
+4. Run `git push && git push --tags`. The tag starts
    `.github/workflows/release.yml`, which stops if the tag isn't the manifest
    version, then lints, tests, builds, attests the build, and opens a draft
    release with `main.js`, `manifest.json` and `styles.css`.
-4. Check the draft and publish it.
+5. Check the draft and publish it.
 
 `npm test` also checks that `package.json`, `package-lock.json`,
 `manifest.json` and `versions.json` agree on the version.
@@ -171,3 +173,10 @@ still in the public history. Fixes before the listing go into 1.0.0 without
 a version bump: skip step 2, and delete the draft or published 1.0.0 release
 and its tag before tagging again. Numbering moves on from the first listed
 release.
+
+**Listed 2026-10-31 as 1.0.0** (submitted at community.obsidian.md, the
+entry live with its automated review running). From here on every fix is a
+new version (`npm version patch` → 1.0.1), never a re-released 1.0.0: people
+who installed it only get a fix when the number goes up. The directory finds
+a new release by itself; "Check for new releases" on the entry's page forces
+it, and "Review branch" previews the automated review on any branch or commit.

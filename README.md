@@ -23,10 +23,7 @@ import them.
 
 ## Install
 
-Search for **Jot Import** in **Settings ▸ Community plugins ▸ Browse**. Until
-it's listed there, install it with
-[BRAT](https://github.com/TfTHacker/obsidian42-brat) using
-`yesokcool/jot-import`.
+Search for **Jot Import** in **Settings ▸ Community plugins ▸ Browse**.
 
 Needs Obsidian 1.13 or later, on desktop or mobile.
 
@@ -34,7 +31,8 @@ Needs Obsidian 1.13 or later, on desktop or mobile.
 
 Jot Import makes no network requests and collects no data. It reads a file
 from outside your vault only when you pick one with **Choose a file**, to
-import it. It writes only to the Obsidian notes you choose and saves the
+import it. It looks through your vault's notes and their properties to find
+the notes linked to Jot categories and new Jot exports. It writes only to the Obsidian notes you choose and saves the
 export's photos and files. After an import it moves a Jot export in your vault
 to the trash. You can turn that off in settings.
 

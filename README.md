@@ -32,10 +32,11 @@ Needs Obsidian 1.13 or later, on desktop or mobile.
 
 ## Privacy
 
-Jot Import makes no network requests and collects no data. It writes only to
-the Obsidian notes you choose and saves the export's photos and files. After
-an import it moves a Jot export in your vault to the trash. You can turn that
-off in settings.
+Jot Import makes no network requests and collects no data. It reads a file
+from outside your vault only when you pick one with **Choose a file**, to
+import it. It writes only to the Obsidian notes you choose and saves the
+export's photos and files. After an import it moves a Jot export in your vault
+to the trash. You can turn that off in settings.
 
 ## License
 

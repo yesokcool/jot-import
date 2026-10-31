@@ -317,6 +317,12 @@ summary.jot-import-linked-label {
   word-break: break-word;
 }
 
+/* Menu items that make a new note or heading, so they don't read as ones that exist. */
+.jot-import-creates,
+.menu-item:has(.jot-import-creates) .menu-item-icon {
+  color: var(--text-accent);
+}
+
 .jot-import-suggestion-note {
   color: var(--text-faint);
   font-size: var(--font-ui-smaller);

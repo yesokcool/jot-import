@@ -245,7 +245,7 @@ export class LinkModal extends Modal {
     if (current && !hasHeading(headings, current)) {
       menu.addItem((item) =>
         item
-          .setTitle(`${headingName(target.heading)} (new)`)
+          .setTitle(createTitle(`${headingName(target.heading)} (new)`))
           .setIcon("heading")
           .setChecked(true),
       );
@@ -271,7 +271,7 @@ export class LinkModal extends Modal {
     menu.addSeparator();
     menu.addItem((item) =>
       item
-        .setTitle("New heading…")
+        .setTitle(createTitle("New heading…"))
         .setIcon("plus")
         .onClick(() => {
           new DestinationModal(this.app, this.context, {
@@ -303,7 +303,7 @@ export class LinkModal extends Modal {
     if (!listed) {
       menu.addItem((item) =>
         item
-          .setTitle(target.exists ? target.path : `New note: ${target.path}`)
+          .setTitle(target.exists ? target.path : createTitle(`New note: ${target.path}`))
           .setIcon(target.exists ? "file-text" : "file-plus")
           .setChecked(true),
       );
@@ -349,7 +349,7 @@ export class LinkModal extends Modal {
     if (pick?.path !== request.newPath) {
       menu.addItem((item) =>
         item
-          .setTitle(request.newPathExists ? request.newPath : `New note: ${request.newPath}`)
+          .setTitle(request.newPathExists ? request.newPath : createTitle(`New note: ${request.newPath}`))
           .setIcon("file-plus")
           .setChecked(choice?.kind === "new" && choice.path === undefined)
           .onClick(() => {
@@ -613,6 +613,11 @@ export class DestinationModal extends Modal {
   onClose() {
     this.contentEl.empty();
   }
+}
+
+/** A menu item that makes something new (a note or a heading), in the accent color so it doesn't read as one that exists. */
+function createTitle(text: string): DocumentFragment {
+  return createFragment((f) => f.createSpan({ cls: "jot-import-creates", text }));
 }
 
 /** Fuzzy matches note paths, like Obsidian's quick switcher. */

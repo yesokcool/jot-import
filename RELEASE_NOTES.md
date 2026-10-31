@@ -1,4 +1,5 @@
-Jot Import now reads only the Jot export you pick.
+Jot Import 1.0.3 fixes imports into notes that list a property twice.
 
-- **Offer to import new Jot exports** starts off. Turn it on in settings to have Jot Import offer each new export saved in your Jots folder, which is handy on a phone.
-- While it's off, the import window lists no exports from your vault, and the Exports folder setting is hidden.
+- When two devices link the same Obsidian note before syncing, Obsidian Sync can list `jot-category-id` twice in it. Obsidian then can't read any of the note's properties, and an import stopped at that note. Jot Import now reads these notes, and lists the property once when it writes to them.
+- When an import stops, the message is clearer and puts each step on its own line.
+- **New note** and **New heading** in the menus are in your accent color, so they don't look like notes that already exist.

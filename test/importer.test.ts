@@ -32,6 +32,7 @@ import {
   runImport,
   saveDeduped,
   startingChoice,
+  propertiesProblem,
   stoppedText,
   summaryText,
   type VaultPort,
@@ -303,6 +304,22 @@ test("linking a note that starts with a byte-order mark adds no second propertie
   const { error } = await importInto(vault, text, { ...SETTINGS, position: "top" }, new Map([[DEV, { kind: "note", path: "Areas/Dev.md" }]]));
   assert.equal(error, null);
   assert.equal(vault.files.get("Areas/Dev.md"), `---\nstatus: active\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n# Dev\n\n- a\n`);
+});
+
+test("a note whose link was synced in twice gets its jots and lists the link once", async () => {
+  // Obsidian Sync merged a Mac's and a phone's link to the same note (2026-10-31); Obsidian then reads none of
+  // its properties. Already linked: the import writes the jots and folds the repeat.
+  const twice = `---\nstatus: active\n${LINK_PROPERTY}:\n  - ${DEV}\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n# Dev\n`;
+  const vault = new FakeVault({ "Areas/Dev.md": twice });
+  const { error } = await importInto(vault, exportText([{ name: "Dev", id: DEV, body: "- a" }]), SETTINGS);
+  assert.equal(error, null);
+  assert.equal(vault.files.get("Areas/Dev.md"), `---\nstatus: active\n${LINK_PROPERTY}:\n  - ${DEV}\n---\n# Dev\n\n- a\n`);
+
+  // Not seen as linked (Obsidian couldn't read it), so the dialog links it again: the repeat is folded first.
+  const relink = new FakeVault({ "Areas/Dev.md": twice });
+  const again = await importInto(relink, exportText([{ name: "Dev", id: NEWCAT, body: "- b" }]), SETTINGS, new Map([[NEWCAT, { kind: "note", path: "Areas/Dev.md" }]]));
+  assert.equal(again.error, null);
+  assert.equal(relink.files.get("Areas/Dev.md"), `---\nstatus: active\n${LINK_PROPERTY}:\n  - ${DEV}\n  - ${NEWCAT}\n---\n# Dev\n\n- b\n`);
 });
 
 test("two categories can share a note, and a note holds both ids", async () => {
@@ -723,8 +740,13 @@ test("the new-export notice goes once its file is gone or its export was importe
 
 test("notices: one period after Obsidian's own messages, and long lists cut short", () => {
   const stopped = stoppedText({ path: "Jot/work.md", message: "File already exists." }, { notes: ["Work"], created: [], linked: [], attachments: 0, unreadable: 0 });
-  assert.ok(stopped.startsWith("Jot Import stopped at Jot/work.md: File already exists. Jots were already added to Work."), stopped);
+  assert.equal(
+    stopped,
+    "Jot Import stopped at Jot/work.md: File already exists.\nBefore stopping, Jot Import added jots to Work.\nThe Jot export file was kept.\nImport the file again to add the rest.",
+  );
   assert.ok(!stopped.includes(".."), stopped);
+  const first = stoppedText({ path: "Jot/work.md", message: "File already exists." }, { notes: [], created: [], linked: [], attachments: 0, unreadable: 0 });
+  assert.ok(!first.includes("Before stopping"), "nothing was added yet");
 
   assert.equal(errorReason(new Error("File already exists. ")), "File already exists");
   assert.equal(errorReason("disk full"), "disk full");
@@ -1224,4 +1246,13 @@ test("workspaces: Change where categories go offers a new note in the category's
   const vault = new FakeVault({ "Areas/Inbox.md": `---\n${LINK_PROPERTY}:\n  - ${HOME_INBOX}\n---\n` });
   const [request] = linkedCategories(vault.notes(), () => ({ name: "Inbox", workspace: "Home" }), SETTINGS);
   assert.equal(request.newPath, "Jot/Home/Inbox.md");
+});
+
+test("notices: properties Obsidian can't read are named in plain words, with the note's own line", () => {
+  // Obsidian's message from the yaml parser, as a phone showed it (2026-10-31).
+  const yaml = new Error("Map keys must be unique at line 6, column 1:\n\n  - 0D4C2A1B-1111-4A2B-9C3D-000000000001\njot-category-id:\n^\n");
+  yaml.name = "YAMLParseError";
+  assert.equal(propertiesProblem(yaml), "Obsidian can't read the properties at the top of the note. Line 7 has a mistake");
+  assert.ok(!propertiesProblem(yaml).includes("^"));
+  assert.equal(propertiesProblem(new Error("File already exists.")), "File already exists.", "other errors as they are");
 });

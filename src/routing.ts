@@ -90,6 +90,84 @@ export function withHeading(existing: unknown, id: string, heading: string | und
 }
 
 /**
+ * The note with Jot Import's two properties listed once each. When two devices link the same note before
+ * syncing, Obsidian Sync can merge both copies in, so `jot-category-id` is listed twice and Obsidian reads none
+ * of the note's properties ("Map keys must be unique", 2026-10-31). A repeat is folded into the first: every id
+ * once, and each heading entry once (the first wins). Left as it is when a repeat isn't in the shape Jot Import
+ * writes, and when nothing repeats.
+ */
+export function withPropertiesOnce(text: string): string {
+  const open = /^(\uFEFF?---\r?\n)/.exec(text);
+  if (!open) return text;
+  const start = open[1].length;
+  const close = /\r?\n---[ \t]*(?:\r?\n|$)/g;
+  close.lastIndex = start - 1;
+  const end = close.exec(text);
+  if (!end) return text;
+  const frontmatter = text.slice(start, end.index);
+  const once = propertiesOnce(frontmatter);
+  return once === frontmatter ? text : text.slice(0, start) + once + text.slice(end.index);
+}
+
+/** `withPropertiesOnce` for the text between the "---" lines. */
+export function propertiesOnce(frontmatter: string): string {
+  const eol = frontmatter.includes("\r\n") ? "\r\n" : "\n";
+  // Top-level properties, each with the lines under it. A line that isn't indented, a list item or a comment starts one.
+  const blocks: Array<{ key: string | null; lines: string[] }> = [];
+  for (const line of frontmatter.split(/\r?\n/)) {
+    const key = /^([^\s#-][^:]*):/.exec(line);
+    if (key || blocks.length === 0) blocks.push({ key: key ? key[1].trim() : null, lines: [line] });
+    else blocks[blocks.length - 1].lines.push(line);
+  }
+  let changed = false;
+  for (const [property, merge] of [
+    [LINK_PROPERTY, mergedIds],
+    [HEADING_PROPERTY, mergedHeadings],
+  ] as const) {
+    const repeats = blocks.filter((b) => b.key === property);
+    if (repeats.length < 2) continue;
+    const merged = merge(repeats.map((b) => b.lines));
+    if (merged === null) continue;
+    repeats[0].lines = merged;
+    for (const repeat of repeats.slice(1)) blocks.splice(blocks.indexOf(repeat), 1);
+    changed = true;
+  }
+  return changed ? blocks.flatMap((b) => b.lines).join(eol) : frontmatter;
+}
+
+const ANY_UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+/** The ids of several `jot-category-id` blocks as one list, or null when one holds more than ids. */
+function mergedIds(blocks: string[][]): string[] | null {
+  const ids: string[] = [];
+  for (const lines of blocks) {
+    const text = lines.join("\n");
+    // Only the key, list marks, quotes and ids: anything else is the user's and isn't ours to fold.
+    if (!/^[^:]*:[\s\-[\]",']*$/.test(text.replace(ANY_UUID, ""))) return null;
+    for (const id of text.match(ANY_UUID) ?? []) if (!ids.includes(id.toUpperCase())) ids.push(id.toUpperCase());
+  }
+  return [`${LINK_PROPERTY}:`, ...ids.map((id) => `  - ${id}`)];
+}
+
+/** The entries of several `jot-category-heading` blocks as one map, or null when one isn't a list of id entries. */
+function mergedHeadings(blocks: string[][]): string[] | null {
+  const seen = new Set<string>();
+  const out = [`${HEADING_PROPERTY}:`];
+  for (const [first, ...entries] of blocks) {
+    if (first.trim() !== `${HEADING_PROPERTY}:`) return null;
+    for (const entry of entries) {
+      if (entry.trim() === "") continue;
+      const id = /^\s+"?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"?\s*:/i.exec(entry);
+      if (!id) return null;
+      if (seen.has(id[1].toUpperCase())) continue;
+      seen.add(id[1].toUpperCase());
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+/**
  * The folder setting as Obsidian's `normalizePath` would write it. Vault paths are always in this form,
  * so "Inbox " or "A//B" would otherwise miss the existing folder and create a second one beside it.
  */

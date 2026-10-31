@@ -18,6 +18,7 @@ import {
   withLinkedId,
   workspaceFolder,
   withoutLinkedId,
+  withPropertiesOnce,
 } from "../src/routing.ts";
 
 const A = "0D4C2A1B-1111-4A2B-9C3D-000000000001";
@@ -214,4 +215,57 @@ test("a workspace's folder is inside the Folder, named like a note", () => {
   assert.equal(workspaceFolder("Jots", "Work / Side: projects?"), "Jots/Work - Side- projects");
   assert.equal(workspaceFolder("Jots", ".hidden"), "Jots/hidden");
   assert.equal(workspaceFolder("Jots", null), "Jots");
+});
+
+test("withPropertiesOnce: a link two devices synced in is listed once", () => {
+  // Notes after Obsidian Sync merged a Mac's and a phone's link (2026-10-31).
+  const synced = `---\nstatus:\n  - in-progress\njot-category-id:\n  - ${A}\njot-category-id:\n  - ${A}\n---\n\n# Project\n`;
+  assert.equal(withPropertiesOnce(synced), `---\nstatus:\n  - in-progress\njot-category-id:\n  - ${A}\n---\n\n# Project\n`);
+
+  const withHeadings = [
+    "---",
+    "aliases:",
+    "  - apps",
+    "jot-category-id:",
+    `  - ${A}`,
+    "jot-category-heading:",
+    `  ${A}: "**APPS**"`,
+    "jot-category-id:",
+    `  - ${A}`,
+    "jot-category-heading:",
+    `  ${A}: "**APPS**"`,
+    "---",
+    "body",
+  ].join("\n");
+  assert.equal(
+    withPropertiesOnce(withHeadings),
+    ["---", "aliases:", "  - apps", "jot-category-id:", `  - ${A}`, "jot-category-heading:", `  ${A}: "**APPS**"`, "---", "body"].join("\n"),
+  );
+});
+
+test("withPropertiesOnce: different links from two devices are kept together", () => {
+  const text = `---\njot-category-id:\n  - ${A}\njot-category-heading:\n  ${A}: Inbox\njot-category-id: ${B.toLowerCase()}\njot-category-heading:\n  ${A}: Later\n  ${B}: ""\n---\n`;
+  assert.equal(
+    withPropertiesOnce(text),
+    `---\njot-category-id:\n  - ${A}\n  - ${B}\njot-category-heading:\n  ${A}: Inbox\n  ${B}: ""\n---\n`,
+    "every id once; the first heading for an id wins",
+  );
+});
+
+test("withPropertiesOnce: leaves alone what isn't Jot Import's to fold", () => {
+  const once = `---\njot-category-id:\n  - ${A}\n---\nbody\n`;
+  assert.equal(withPropertiesOnce(once), once, "nothing repeats");
+  const userText = `---\njot-category-id:\n  - ${A}\njot-category-id: see my other note\n---\n`;
+  assert.equal(withPropertiesOnce(userText), userText, "a repeat holding more than ids");
+  const blockHeading = `---\njot-category-heading:\n  ${A}: |\n    two\n    lines\njot-category-heading:\n  ${A}: x\n---\n`;
+  assert.equal(withPropertiesOnce(blockHeading), blockHeading, "a heading written over several lines");
+  const tags = "---\ntags:\n  - a\ntags:\n  - a\n---\n";
+  assert.equal(withPropertiesOnce(tags), tags, "other properties are the user's");
+  assert.equal(withPropertiesOnce("no properties\n---\n"), "no properties\n---\n");
+  assert.equal(withPropertiesOnce(`---\njot-category-id:\n  - ${A}\n`), `---\njot-category-id:\n  - ${A}\n`, "never closed");
+});
+
+test("withPropertiesOnce: keeps a byte-order mark and Windows line ends", () => {
+  const text = `\uFEFF---\r\njot-category-id:\r\n  - ${A}\r\njot-category-id:\r\n  - ${A}\r\n---\r\nbody\r\n`;
+  assert.equal(withPropertiesOnce(text), `\uFEFF---\r\njot-category-id:\r\n  - ${A}\r\n---\r\nbody\r\n`);
 });

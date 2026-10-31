@@ -1,6 +1,6 @@
 {
   "name": "jot-import",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Obsidian plugin that sorts a Jot export into your notes by category.",
   "main": "main.js",
   "private": true,

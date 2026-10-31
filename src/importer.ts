@@ -14,6 +14,7 @@ import {
   type NoteInfo,
   resolveFolder,
   suggestNote,
+  withPropertiesOnce,
   workspaceFolder,
 } from "./routing.ts";
 
@@ -296,6 +297,14 @@ export function linkMoves(requests: LinkRequest[], choices: Map<string, LinkChoi
 }
 
 /**
+ * A note about to get a link: without a byte-order mark, so the id joins the existing properties, and with Jot
+ * Import's properties listed once, so Obsidian can read them (`withPropertiesOnce`). Obsidian skips unchanged writes.
+ */
+function readyToLink(text: string): string {
+  return withPropertiesOnce(withoutBom(text));
+}
+
+/**
  * "Change where categories go" in the settings: each move's note is created if missing and linked, and the old
  * notes lose the id. No jots are written; the old notes keep the ones they have.
  */
@@ -307,7 +316,7 @@ export async function applyLinkMoves(moves: LinkMove[], port: VaultPort): Promis
       created.push(baseOf(move.path));
     }
     for (const from of move.from) await port.unlink(from, move.id);
-    await port.process(move.path, withoutBom);
+    await port.process(move.path, readyToLink);
     await port.link(move.path, move.id, move.heading);
   }
   return { created };
@@ -360,8 +369,7 @@ export async function runImport(
       // Link first, so a "top" insert lands below the new property.
       if (write.link && write.block.id !== null) {
         for (const from of write.unlinkFrom ?? []) await port.unlink(from, write.block.id);
-        // Drop any byte-order mark so the id joins the existing properties; Obsidian skips unchanged writes.
-        await port.process(write.path, withoutBom);
+        await port.process(write.path, readyToLink);
         await port.link(write.path, write.block.id, write.heading);
         result.linked.push(write.block.name);
       }
@@ -393,7 +401,7 @@ export async function runImport(
         );
       }
       const insert = write.heading === undefined ? options : { ...options, heading: write.heading };
-      await port.process(write.path, (data) => insertIntoNote(data, body, insert));
+      await port.process(write.path, (data) => insertIntoNote(withPropertiesOnce(data), body, insert));
       if (!notePaths.includes(write.path)) notePaths.push(write.path);
       result.notes = noteLabels(notePaths);
       written++;
@@ -574,10 +582,26 @@ export function errorReason(e: unknown): string {
   return (e instanceof Error ? e.message : String(e)).replace(/[.\s]+$/, "");
 }
 
+/** One line each, so the next step reads on its own. Importing again skips the jots already in (`written`). */
 export function stoppedText(error: { path: string; message: string }, result: ImportResult): string {
-  const reason = errorReason(error.message);
-  const done = result.notes.length > 0 ? ` Jots were already added to ${nameList(result.notes)}.` : "";
-  return `Jot Import stopped at ${error.path}: ${reason}.${done} The Jot export file was kept. Import the file again to finish. Jots already imported won't be added twice.`;
+  const lines = [`Jot Import stopped at ${error.path}: ${errorReason(error.message)}.`];
+  if (result.notes.length > 0) lines.push(`Before stopping, Jot Import added jots to ${nameList(result.notes)}.`);
+  lines.push("The Jot export file was kept.", "Import the file again to add the rest.");
+  return lines.join("\n");
+}
+
+/**
+ * Obsidian's error for properties it can't read, in plain words. Its own message names the YAML rule and copies
+ * the lines with a "^" under the spot ("Map keys must be unique at line 6, column 1: … ^"). Its line numbers start
+ * after the opening "---", so the note's line is one more. Other errors are returned as they are.
+ */
+export function propertiesProblem(e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e);
+  const isYaml = (e instanceof Error && e.name.startsWith("YAML")) || /at line \d+, column \d+/.test(message);
+  if (!isYaml) return message;
+  const line = /at line (\d+)/.exec(message);
+  const where = line ? ` Line ${Number(line[1]) + 1} has a mistake` : "";
+  return `Obsidian can't read the properties at the top of the note.${where}`;
 }
 
 /**

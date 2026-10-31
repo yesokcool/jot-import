@@ -17,6 +17,7 @@ import {
   OfferNotice,
   type PriorImport,
   priorImport,
+  propertiesProblem,
   recordImport,
   saveDeduped,
   stoppedText,
@@ -33,10 +34,12 @@ import {
   linkedIdsFrom,
   movedFolder,
   type NoteInfo,
+  propertiesOnce,
   resolveFolder,
   withHeading,
   withLinkedId,
   withoutLinkedId,
+  withPropertiesOnce,
 } from "./routing.ts";
 import { JotImportSettingTab } from "./settings.ts";
 import { looksLikeZip, MOBILE_ZIP_LIMITS, wholeBuffer, ZIP_LIMITS, ZipError, type ZipLimits } from "./zip.ts";
@@ -192,7 +195,7 @@ export default class JotImportPlugin extends Plugin {
     if (!file) return;
     this.pendingLinks.get(path)?.delete(id.toUpperCase());
     const indexed = this.metadataChange(file);
-    await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+    await editProperties(this.app, file, (fm) => {
       const next = withoutLinkedId(fm[LINK_PROPERTY], id);
       if (next) fm[LINK_PROPERTY] = next;
       else delete fm[LINK_PROPERTY];
@@ -206,7 +209,7 @@ export default class JotImportPlugin extends Plugin {
     const file = this.app.vault.getFileByPath(path);
     if (!file) return;
     const indexed = this.metadataChange(file);
-    await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => setHeadingProperty(fm, id, heading));
+    await editProperties(this.app, file, (fm) => setHeadingProperty(fm, id, heading));
     await indexed;
   }
 
@@ -696,6 +699,19 @@ function confirmReimport(app: App, importedAt: number): Promise<boolean> {
   });
 }
 
+/**
+ * Change a note's properties, with Jot Import's own listed once first so Obsidian can read them
+ * (`withPropertiesOnce`), and a plain reason when it still can't (`propertiesProblem`).
+ */
+async function editProperties(app: App, file: TFile, fn: (fm: Record<string, unknown>) => void): Promise<void> {
+  await app.vault.process(file, withPropertiesOnce);
+  try {
+    await app.fileManager.processFrontMatter(file, fn);
+  } catch (e) {
+    throw new Error(propertiesProblem(e));
+  }
+}
+
 /** The importer's view of the real vault. */
 class ObsidianVault implements VaultPort {
   constructor(
@@ -707,8 +723,10 @@ class ObsidianVault implements VaultPort {
     const out: NoteInfo[] = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
       const cache = this.app.metadataCache.getFileCache(file);
-      // Not indexed yet (right after startup): read the frontmatter so a linked note isn't missed.
-      const fm: unknown = cache ? cache.frontmatter : await this.readFrontmatter(file);
+      // Not indexed yet (right after startup), or properties Obsidian couldn't read (`withPropertiesOnce`): read
+      // the frontmatter so a linked note isn't missed.
+      const unread = !cache || (!cache.frontmatter && (cache.frontmatterPosition !== undefined || cache.sections?.[0]?.type === "yaml"));
+      const fm: unknown = unread ? await this.readFrontmatter(file) : cache.frontmatter;
       const linkedIds = [...new Set([...linkedIdsFrom(fm), ...this.plugin.pendingLinksOf(file.path)])];
       out.push({ path: file.path, basename: file.basename, aliases: aliasesFrom(fm), linkedIds, headings: headingsFrom(fm) });
     }
@@ -732,7 +750,7 @@ class ObsidianVault implements VaultPort {
 
   async link(path: string, id: string, heading?: string): Promise<void> {
     const file = this.file(path);
-    await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+    await editProperties(this.app, file, (fm) => {
       fm[LINK_PROPERTY] = withLinkedId(fm[LINK_PROPERTY], id);
       if (heading !== undefined) setHeadingProperty(fm, id, heading);
     });
@@ -775,7 +793,7 @@ class ObsidianVault implements VaultPort {
     const info = getFrontMatterInfo(await this.app.vault.cachedRead(file));
     if (!info.exists) return null;
     try {
-      return parseYaml(info.frontmatter) as unknown;
+      return parseYaml(propertiesOnce(info.frontmatter)) as unknown;
     } catch {
       return null;
     }

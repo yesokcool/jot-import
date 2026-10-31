@@ -25,12 +25,16 @@ export interface LinkContext {
   categoryName(id: string): string;
 }
 
-/** The categories a note is linked to, by name ("Apps", "Apps and Jot"), leaving out `except`. */
-function linkedNames(context: LinkContext, path: string, except: string | null = null): string {
+/**
+ * The other categories whose jots go to a note, so it reads as one that can be shared, not taken (2026-10-31):
+ * "Apps also goes here", "Apps and Jot also go here", or null for none.
+ */
+function alsoGoesHere(context: LinkContext, path: string, except: string | null = null): string | null {
   const ids = context.notes.find((n) => n.path === path)?.linkedIds ?? [];
   const names = ids.filter((id) => id !== except?.toUpperCase()).map((id) => context.categoryName(id));
-  if (names.length === 0) return "another category";
-  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  if (names.length === 0) return null;
+  if (names.length === 1) return `${names[0]} also goes here`;
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]} also go here`;
 }
 
 /** Where a row's jots go. */
@@ -203,11 +207,12 @@ export class LinkModal extends Modal {
       const suggested = request.linked === null && choice === this.starting.get(id);
       const tag = !target.exists ? (suggested ? "(new, suggested)" : "(new)") : suggested ? "(suggested)" : null;
       if (tag) dest.createSpan({ cls: "jot-import-link-new", text: tag });
-      const held = target.path === request.linkedSameName ? ` is also linked to ${linkedNames(this.context, target.path, id)}.` : "";
-      setTooltip(dest, target.exists ? `${target.path}${held}` : `New note: ${target.path}`);
+      const shared = target.exists ? alsoGoesHere(this.context, target.path, id) : null;
+      setTooltip(dest, target.exists ? (shared ? `${target.path}. ${shared}.` : target.path) : `New note: ${target.path}`);
     } else {
       label = dest.createSpan({ cls: "jot-import-link-choose", text: "Choose a note" });
-      const held = request.linkedSameName ? `. ${request.linkedSameName} is linked to ${linkedNames(this.context, request.linkedSameName, id)}.` : "";
+      const shared = request.linkedSameName ? alsoGoesHere(this.context, request.linkedSameName, id) : null;
+      const held = shared ? `. ${request.linkedSameName}: ${shared}.` : "";
       setTooltip(dest, `Choose an Obsidian note for ${request.block.name}${held}`);
     }
     setIcon(dest.createSpan({ cls: "jot-import-link-chevron" }), "chevron-down");
@@ -352,7 +357,7 @@ export class LinkModal extends Modal {
     if (held !== null) {
       menu.addItem((item) =>
         item
-          .setTitle(`${held} (linked to ${linkedNames(this.context, held, id)})`)
+          .setTitle(`${held} (${alsoGoesHere(this.context, held, id) ?? "shared"})`)
           .setIcon("file-text")
           .setChecked(choice?.kind === "note" && choice.path === held)
           .onClick(() => {
@@ -382,6 +387,7 @@ export class LinkModal extends Modal {
         .onClick(() => {
           new DestinationModal(this.app, this.context, {
             title: `Choose an Obsidian note for ${request.block.name}`,
+            categoryId: id,
             note: target ? { path: target.path, exists: target.exists } : { path: "", exists: false },
             heading: target?.heading ?? this.context.heading,
             onDone: (picked) => {
@@ -523,6 +529,8 @@ export class DestinationModal extends Modal {
       onDone: (picked: Destination) => void;
       /** The note's path when `note` is null. */
       path?: string;
+      /** The category being placed, left out of "… also goes here". */
+      categoryId?: string;
     },
   ) {
     super(app);
@@ -548,7 +556,7 @@ export class DestinationModal extends Modal {
           this.app,
           text.inputEl,
           this.context.notes,
-          (note) => (note.linkedIds.length > 0 ? `Linked to ${linkedNames(this.context, note.path)}` : null),
+          (note) => alsoGoesHere(this.context, note.path, this.options.categoryId ?? null),
           (note) => {
             text.setValue(withoutExtension(note.path));
             this.update();

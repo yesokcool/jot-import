@@ -1,5 +1,3 @@
-Jot Import 1.0.4 makes the choose-notes dialog and its errors clearer.
+Jot Import 1.0.5 makes it clearer that categories can share an Obsidian note.
 
-- A note picked for a new category because its name matches now says **(suggested)**, until you choose a note yourself.
-- When a note is already linked to another category, Jot Import names that category, like "Linked to Apps".
-- If an import stops because a note lists the same property twice, the message names the property and says how to fix it.
+- When you choose a note that another category already goes to, Jot Import now says "Apps also goes here" instead of "Linked to Apps". Pick it anyway: each category keeps its own heading in the note.

@@ -19,6 +19,7 @@ import {
   workspaceFolder,
   withoutLinkedId,
   withPropertiesOnce,
+  repeatedProperties,
 } from "../src/routing.ts";
 
 const A = "0D4C2A1B-1111-4A2B-9C3D-000000000001";
@@ -268,4 +269,9 @@ test("withPropertiesOnce: leaves alone what isn't Jot Import's to fold", () => {
 test("withPropertiesOnce: keeps a byte-order mark and Windows line ends", () => {
   const text = `\uFEFF---\r\njot-category-id:\r\n  - ${A}\r\njot-category-id:\r\n  - ${A}\r\n---\r\nbody\r\n`;
   assert.equal(withPropertiesOnce(text), `\uFEFF---\r\njot-category-id:\r\n  - ${A}\r\n---\r\nbody\r\n`);
+});
+
+test("repeatedProperties: each name listed more than once, once", () => {
+  assert.deepEqual(repeatedProperties("tags:\n  - a\nstatus: x\ntags:\n  - a\ntags: b"), ["tags"]);
+  assert.deepEqual(repeatedProperties("a: 1\nb:\n  - a: 1\n# a: 2\n- a: 3"), [], "items and comments aren't properties");
 });

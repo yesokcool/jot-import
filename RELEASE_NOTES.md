@@ -1,5 +1,5 @@
-Jot Import 1.0.3 fixes imports into notes that list a property twice.
+Jot Import 1.0.4 makes the choose-notes dialog and its errors clearer.
 
-- When two devices link the same Obsidian note before syncing, Obsidian Sync can list `jot-category-id` twice in it. Obsidian then can't read any of the note's properties, and an import stopped at that note. Jot Import now reads these notes, and lists the property once when it writes to them.
-- When an import stops, the message is clearer and puts each step on its own line.
-- **New note** and **New heading** in the menus are in your accent color, so they don't look like notes that already exist.
+- A note picked for a new category because its name matches now says **(suggested)**, until you choose a note yourself.
+- When a note is already linked to another category, Jot Import names that category, like "Linked to Apps".
+- If an import stops because a note lists the same property twice, the message names the property and says how to fix it.

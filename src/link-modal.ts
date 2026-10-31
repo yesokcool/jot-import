@@ -21,9 +21,17 @@ export interface LinkContext {
   /** Paths that can't be chosen or created (the export file). */
   exclude: Set<string>;
   headingsOf(path: string): Array<{ heading: string; level: number }>;
+  /** A category's name from the last export that had it. */
+  categoryName(id: string): string;
 }
 
-const LINKED_ELSEWHERE = "is already linked to another category";
+/** The categories a note is linked to, by name ("Apps", "Apps and Jot"), leaving out `except`. */
+function linkedNames(context: LinkContext, path: string, except: string | null = null): string {
+  const ids = context.notes.find((n) => n.path === path)?.linkedIds ?? [];
+  const names = ids.filter((id) => id !== except?.toUpperCase()).map((id) => context.categoryName(id));
+  if (names.length === 0) return "another category";
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
 
 /** Where a row's jots go. */
 interface Target {
@@ -54,6 +62,8 @@ export class LinkModal extends Modal {
   private resizeObserver: ResizeObserver | null = null;
   private done = false;
   private linked: LinkRequest[];
+  /** The choices the dialog opened with, so a row still on its suggestion can say so. */
+  private starting = new Map<string, LinkChoice>();
 
   private constructor(
     app: App,
@@ -66,7 +76,10 @@ export class LinkModal extends Modal {
     this.linked = options.linked ?? [];
     for (const request of [...requests, ...this.linked]) {
       const choice = startingChoice(request);
-      if (choice) this.choices.set(request.block.id, choice);
+      if (choice) {
+        this.choices.set(request.block.id, choice);
+        this.starting.set(request.block.id, choice);
+      }
     }
   }
 
@@ -186,12 +199,15 @@ export class LinkModal extends Modal {
     if (target) {
       label = dest.createSpan({ cls: "jot-import-link-path" });
       renderPath(label, target.path, this.context.shortenPaths);
-      if (!target.exists) dest.createSpan({ cls: "jot-import-link-new", text: "(new)" });
-      const held = target.path === request.linkedSameName ? ` ${LINKED_ELSEWHERE}.` : "";
+      // A new category's note picked by name, until the user picks one, so a saved or chosen link reads apart.
+      const suggested = request.linked === null && choice === this.starting.get(id);
+      const tag = !target.exists ? (suggested ? "(new, suggested)" : "(new)") : suggested ? "(suggested)" : null;
+      if (tag) dest.createSpan({ cls: "jot-import-link-new", text: tag });
+      const held = target.path === request.linkedSameName ? ` is also linked to ${linkedNames(this.context, target.path, id)}.` : "";
       setTooltip(dest, target.exists ? `${target.path}${held}` : `New note: ${target.path}`);
     } else {
       label = dest.createSpan({ cls: "jot-import-link-choose", text: "Choose a note" });
-      const held = request.linkedSameName ? `. ${request.linkedSameName} ${LINKED_ELSEWHERE}.` : "";
+      const held = request.linkedSameName ? `. ${request.linkedSameName} is linked to ${linkedNames(this.context, request.linkedSameName, id)}.` : "";
       setTooltip(dest, `Choose an Obsidian note for ${request.block.name}${held}`);
     }
     setIcon(dest.createSpan({ cls: "jot-import-link-chevron" }), "chevron-down");
@@ -336,7 +352,7 @@ export class LinkModal extends Modal {
     if (held !== null) {
       menu.addItem((item) =>
         item
-          .setTitle(`${held} (linked to another category)`)
+          .setTitle(`${held} (linked to ${linkedNames(this.context, held, id)})`)
           .setIcon("file-text")
           .setChecked(choice?.kind === "note" && choice.path === held)
           .onClick(() => {
@@ -528,10 +544,16 @@ export class DestinationModal extends Modal {
         this.noteInput = text;
         text.setValue(withoutExtension(this.notePath)).setPlaceholder("Note name");
         text.onChange(() => this.update());
-        new NoteSuggest(this.app, text.inputEl, this.context.notes, (note) => {
-          text.setValue(withoutExtension(note.path));
-          this.update();
-        });
+        new NoteSuggest(
+          this.app,
+          text.inputEl,
+          this.context.notes,
+          (note) => (note.linkedIds.length > 0 ? `Linked to ${linkedNames(this.context, note.path)}` : null),
+          (note) => {
+            text.setValue(withoutExtension(note.path));
+            this.update();
+          },
+        );
       });
       this.noteStatus = contentEl.createDiv({ cls: "jot-import-destination-status" });
     } else {
@@ -626,6 +648,8 @@ class NoteSuggest extends AbstractInputSuggest<NoteInfo> {
     app: App,
     inputEl: HTMLInputElement,
     private notes: NoteInfo[],
+    /** A line under the note's path, such as the categories it's linked to. */
+    private describe: (note: NoteInfo) => string | null,
     private pick: (note: NoteInfo) => void,
   ) {
     super(app, inputEl);
@@ -645,7 +669,8 @@ class NoteSuggest extends AbstractInputSuggest<NoteInfo> {
 
   renderSuggestion(note: NoteInfo, el: HTMLElement) {
     el.createDiv({ text: withoutExtension(note.path) });
-    if (note.linkedIds.length > 0) el.createDiv({ cls: "jot-import-suggestion-note", text: "Already linked to a category" });
+    const description = this.describe(note);
+    if (description) el.createDiv({ cls: "jot-import-suggestion-note", text: description });
   }
 
   selectSuggestion(note: NoteInfo) {

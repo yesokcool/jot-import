@@ -742,11 +742,13 @@ test("notices: one period after Obsidian's own messages, and long lists cut shor
   const stopped = stoppedText({ path: "Jot/work.md", message: "File already exists." }, { notes: ["Work"], created: [], linked: [], attachments: 0, unreadable: 0 });
   assert.equal(
     stopped,
-    "Jot Import stopped at Jot/work.md: File already exists.\nBefore stopping, Jot Import added jots to Work.\nThe Jot export file was kept.\nImport the file again to add the rest.",
+    "Jot Import stopped at Jot/work.md.\nFile already exists.\nBefore stopping, Jot Import added jots to Work.\nThe Jot export file was kept.\nImport the file again to add the rest.",
   );
   assert.ok(!stopped.includes(".."), stopped);
   const first = stoppedText({ path: "Jot/work.md", message: "File already exists." }, { notes: [], created: [], linked: [], attachments: 0, unreadable: 0 });
   assert.ok(!first.includes("Before stopping"), "nothing was added yet");
+  const missing = stoppedText({ path: "Jot/work.md", message: "the Obsidian note is missing" }, { notes: [], created: [], linked: [], attachments: 0, unreadable: 0 });
+  assert.ok(missing.includes("\nThe Obsidian note is missing.\n"), missing);
 
   assert.equal(errorReason(new Error("File already exists. ")), "File already exists");
   assert.equal(errorReason("disk full"), "disk full");
@@ -1252,7 +1254,16 @@ test("notices: properties Obsidian can't read are named in plain words, with the
   // Obsidian's message from the yaml parser, as a phone showed it (2026-10-31).
   const yaml = new Error("Map keys must be unique at line 6, column 1:\n\n  - 0D4C2A1B-1111-4A2B-9C3D-000000000001\njot-category-id:\n^\n");
   yaml.name = "YAMLParseError";
-  assert.equal(propertiesProblem(yaml), "Obsidian can't read the properties at the top of the note. Line 7 has a mistake");
+  const twice = "status: active\ntags:\n  - trips\ntags:\n  - trips";
+  assert.equal(
+    propertiesProblem(yaml, twice),
+    'This Obsidian note has two properties named "tags", and Obsidian doesn\'t allow that. Open the note and delete the second "tags" and anything listed under it',
+  );
+  assert.equal(
+    propertiesProblem(yaml),
+    "Obsidian can't read the properties at the top of this Obsidian note because line 7 has a mistake. Open the note and fix that line",
+    "no repeat found: the line",
+  );
   assert.ok(!propertiesProblem(yaml).includes("^"));
   assert.equal(propertiesProblem(new Error("File already exists.")), "File already exists.", "other errors as they are");
 });

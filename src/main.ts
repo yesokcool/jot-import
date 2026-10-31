@@ -264,6 +264,7 @@ export default class JotImportPlugin extends Plugin {
       newHeading: this.settings.newHeadingPosition,
       exclude,
       headingsOf: (path) => this.headingsOf(path),
+      categoryName: (id) => this.categoryName(id),
     };
   }
 
@@ -708,7 +709,8 @@ async function editProperties(app: App, file: TFile, fn: (fm: Record<string, unk
   try {
     await app.fileManager.processFrontMatter(file, fn);
   } catch (e) {
-    throw new Error(propertiesProblem(e));
+    const info = getFrontMatterInfo(await app.vault.cachedRead(file));
+    throw new Error(propertiesProblem(e, info.exists ? info.frontmatter : ""));
   }
 }
 

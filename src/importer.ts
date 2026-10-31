@@ -13,6 +13,7 @@ import {
   nameTarget,
   type NoteInfo,
   resolveFolder,
+  repeatedProperties,
   suggestNote,
   withPropertiesOnce,
   workspaceFolder,
@@ -584,24 +585,31 @@ export function errorReason(e: unknown): string {
 
 /** One line each, so the next step reads on its own. Importing again skips the jots already in (`written`). */
 export function stoppedText(error: { path: string; message: string }, result: ImportResult): string {
-  const lines = [`Jot Import stopped at ${error.path}: ${errorReason(error.message)}.`];
+  const reason = errorReason(error.message);
+  const lines = [`Jot Import stopped at ${error.path}.`, `${reason.charAt(0).toUpperCase()}${reason.slice(1)}.`];
   if (result.notes.length > 0) lines.push(`Before stopping, Jot Import added jots to ${nameList(result.notes)}.`);
   lines.push("The Jot export file was kept.", "Import the file again to add the rest.");
   return lines.join("\n");
 }
 
 /**
- * Obsidian's error for properties it can't read, in plain words. Its own message names the YAML rule and copies
- * the lines with a "^" under the spot ("Map keys must be unique at line 6, column 1: … ^"). Its line numbers start
- * after the opening "---", so the note's line is one more. Other errors are returned as they are.
+ * Obsidian's error for properties it can't read, as what's wrong and how to fix it. Its own message names the YAML
+ * rule and copies the lines with a "^" under the spot ("Map keys must be unique at line 6, column 1: … ^"). Its line
+ * numbers start after the opening "---", so the note's line is one more. `frontmatter` is the note's, to name a
+ * property listed twice, with how to fix it (2026-10-31). Other errors are returned as they are.
  */
-export function propertiesProblem(e: unknown): string {
+export function propertiesProblem(e: unknown, frontmatter = ""): string {
   const message = e instanceof Error ? e.message : String(e);
   const isYaml = (e instanceof Error && e.name.startsWith("YAML")) || /at line \d+, column \d+/.test(message);
   if (!isYaml) return message;
+  const [name] = repeatedProperties(frontmatter);
+  if (name !== undefined) {
+    return `This Obsidian note has two properties named "${name}", and Obsidian doesn't allow that. Open the note and delete the second "${name}" and anything listed under it`;
+  }
   const line = /at line (\d+)/.exec(message);
-  const where = line ? ` Line ${Number(line[1]) + 1} has a mistake` : "";
-  return `Obsidian can't read the properties at the top of the note.${where}`;
+  return line
+    ? `Obsidian can't read the properties at the top of this Obsidian note because line ${Number(line[1]) + 1} has a mistake. Open the note and fix that line`
+    : "Obsidian can't read the properties at the top of this Obsidian note. Open the note and fix them";
 }
 
 /**

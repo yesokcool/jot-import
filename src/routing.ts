@@ -109,16 +109,27 @@ export function withPropertiesOnce(text: string): string {
   return once === frontmatter ? text : text.slice(0, start) + once + text.slice(end.index);
 }
 
-/** `withPropertiesOnce` for the text between the "---" lines. */
-export function propertiesOnce(frontmatter: string): string {
-  const eol = frontmatter.includes("\r\n") ? "\r\n" : "\n";
-  // Top-level properties, each with the lines under it. A line that isn't indented, a list item or a comment starts one.
+/** Top-level properties, each with the lines under it. A line that isn't indented, a list item or a comment starts one. */
+function propertyBlocks(frontmatter: string): Array<{ key: string | null; lines: string[] }> {
   const blocks: Array<{ key: string | null; lines: string[] }> = [];
   for (const line of frontmatter.split(/\r?\n/)) {
     const key = /^([^\s#-][^:]*):/.exec(line);
     if (key || blocks.length === 0) blocks.push({ key: key ? key[1].trim() : null, lines: [line] });
     else blocks[blocks.length - 1].lines.push(line);
   }
+  return blocks;
+}
+
+/** Property names listed more than once, which Obsidian can't read ("Map keys must be unique"). */
+export function repeatedProperties(frontmatter: string): string[] {
+  const keys = propertyBlocks(frontmatter).flatMap((b) => (b.key === null ? [] : [b.key]));
+  return keys.filter((key, i) => keys.indexOf(key) !== i && keys.indexOf(key, i + 1) === -1);
+}
+
+/** `withPropertiesOnce` for the text between the "---" lines. */
+export function propertiesOnce(frontmatter: string): string {
+  const eol = frontmatter.includes("\r\n") ? "\r\n" : "\n";
+  const blocks = propertyBlocks(frontmatter);
   let changed = false;
   for (const [property, merge] of [
     [LINK_PROPERTY, mergedIds],

@@ -1,4 +1,4 @@
-Fixes from the Community plugins review. Jot Import works the same as in 1.0.0.
+Jot Import now reads only the Jot export you pick.
 
-- Two warnings from Obsidian's automatic review are fixed: one in the code, one in the styles.
-- The README says what Jot Import reads in your vault and why.
+- **Offer to import new Jot exports** starts off. Turn it on in settings to have Jot Import offer each new export saved in your Jots folder, which is handy on a phone.
+- While it's off, the import window lists no exports from your vault, and the Exports folder setting is hidden.

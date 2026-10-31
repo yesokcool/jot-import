@@ -25,7 +25,10 @@ export interface JotImportSettings {
   endMarker: string;
   /** Move an export file that lives inside the vault to the trash once imported. */
   trashAfterImport: boolean;
-  /** Show a notice with an Import button when an export is saved in `exportsFolder`. */
+  /**
+   * Show a notice with an Import button when an export is saved in `exportsFolder`, and list that folder's
+   * exports in the import window. Off to start (2026-10-31), so Jot Import reads only the file you pick.
+   */
   offerNewExports: boolean;
   /** The one folder (and its subfolders) watched for new exports; "" is the whole vault. */
   exportsFolder: string;
@@ -48,7 +51,7 @@ export const DEFAULT_SETTINGS: JotImportSettings = {
   startMarker: "*Jots imported {{date}}*",
   endMarker: "---",
   trashAfterImport: true,
-  offerNewExports: true,
+  offerNewExports: false,
   exportsFolder: "Jots",
   shortenPaths: "middle",
   collapseLinked: false,

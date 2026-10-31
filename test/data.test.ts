@@ -48,7 +48,8 @@ test("a saved routing mode from an earlier version is ignored, and not saved bac
   assert.deepEqual(dataToSave(settings, chosen, state), { folder: "", history: [], categoryNames: {} });
 });
 
-test("new exports are watched for in the Jots folder only", () => {
+test("new exports are watched for in the Jots folder only, and only once that's turned on", () => {
+  assert.equal(DEFAULT_SETTINGS.offerNewExports, false, "reads only the file you pick until turned on");
   assert.equal(DEFAULT_SETTINGS.exportsFolder, "Jots");
   assert.equal(readSaved({ exportsFolder: " Jot//Exports/ " }).settings.exportsFolder, "Jot/Exports");
   assert.equal(readSaved({ exportsFolder: "" }).settings.exportsFolder, "", "the whole vault, when chosen");

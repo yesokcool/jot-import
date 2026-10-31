@@ -18,8 +18,9 @@ Jot Import remembers your choices for the next import. It always shows you
 where the jots will go before it writes anything. Photos and files come
 along when the export is a .zip.
 
-Save Jot exports to your vault's **Jots** folder and Jot Import offers to
-import them.
+On a phone it can be easier to save exports into your vault's **Jots**
+folder. Turn on **Offer to import new Jot exports** in Jot Import's settings and
+it offers to import each new one.
 
 ## Install
 
@@ -29,10 +30,11 @@ Needs Obsidian 1.13 or later, on desktop or mobile.
 
 ## Privacy
 
-Jot Import makes no network requests and collects no data. It reads a file
-from outside your vault only when you pick one with **Choose a file**, to
-import it. It looks through your vault's notes and their properties to find
-the notes linked to Jot categories and new Jot exports. It writes only to the Obsidian notes you choose and saves the
+Jot Import makes no network requests and collects no data. It reads only the
+Jot export you pick with **Choose a file**, which can be outside your vault.
+If you turn on **Offer to import new Jot exports**, it also checks new files in
+your **Jots** folder to see if they're Jot exports. To find the notes linked to
+Jot categories, it looks through your notes' properties. It writes only to the Obsidian notes you choose and saves the
 export's photos and files. After an import it moves a Jot export in your vault
 to the trash. You can turn that off in settings.
 

@@ -130,14 +130,14 @@ export default class JotImportPlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(
         this.app.vault.on("create", (file) => {
-          if (!(file instanceof TFile)) return;
+          if (!this.settings.offerNewExports || !(file instanceof TFile)) return;
           if (file.extension === "zip") this.offerWhenSettled(file);
           else void this.offerImport(file);
         }),
       );
       this.registerEvent(
         this.app.vault.on("modify", (file) => {
-          if (file instanceof TFile && file.extension === "zip") this.offerWhenSettled(file);
+          if (this.settings.offerNewExports && file instanceof TFile && file.extension === "zip") this.offerWhenSettled(file);
         }),
       );
       void this.offerRecentExports();
@@ -515,8 +515,10 @@ export default class JotImportPlugin extends Plugin {
    * older than `UNZIP_TO_LIST` is listed without its text: unzipping every one a vault keeps is slow on a phone.
    */
   async candidateFiles(): Promise<Array<{ file: TFile; text: string | null }>> {
+    // Off by default: then nothing but the file you pick is read.
+    if (!this.settings.offerNewExports) return [];
     const now = Date.now();
-    const byDate = this.exportFiles().sort((a, b) => b.stat.mtime - a.stat.mtime);
+    const byDate = this.exportFiles().filter((f) => this.isWatched(f)).sort((a, b) => b.stat.mtime - a.stat.mtime);
     const out: Array<{ file: TFile; text: string | null }> = [];
     for (const file of byDate) {
       if (file.extension === "zip" && now - file.stat.mtime > UNZIP_TO_LIST) {
@@ -822,7 +824,7 @@ class ImportModal extends Modal {
 
     const candidates = await this.plugin.candidateFiles();
     if (candidates.length > 0) {
-      new Setting(contentEl).setName("In this vault").setHeading();
+      new Setting(contentEl).setName("In the exports folder").setHeading();
       for (const { file, text } of candidates) {
         const when = new Date(file.stat.mtime).toLocaleString();
         new Setting(contentEl)

@@ -76,11 +76,12 @@ export class JotImportSettingTab extends PluginSettingTab {
       {
         name: "Offer to import new Jot exports",
         desc: "Automatically asks to import Jot exports when placed inside the Exports folder. It's never imported without asking.",
-        control: { type: "toggle", key: "offerNewExports", defaultValue: true },
+        control: { type: "toggle", key: "offerNewExports", defaultValue: false },
       },
       {
         name: "Exports folder",
         desc: "Save Jot exports here to automatically open a dialog to import them. The plugin only searches this folder and the folders in it for Jot exports.",
+        visible: this.plugin.settings.offerNewExports,
         control: { type: "folder", key: "exportsFolder", placeholder: "Vault root", includeRoot: true },
       },
       {
@@ -168,6 +169,8 @@ export class JotImportSettingTab extends PluginSettingTab {
     if (!isSettingKey(key) || !setSetting(this.plugin.settings, key, value)) return;
     this.plugin.chooseSetting(key);
     await this.plugin.saveSettings();
+    // The Exports folder setting shows only while new exports are offered.
+    if (key === "offerNewExports") this.update();
   }
 
   /** "Projects/Dev.md › Inbox": the note and the heading its jots go under, if any. */

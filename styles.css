@@ -98,11 +98,10 @@ summary.jot-import-linked-label {
   padding-top: var(--size-4-1);
 }
 
-/* As wide as the heading buttons (9.5em of a button's small UI font), with their text's inset. */
+/* As wide as the heading buttons (9.5em of a button's small UI font), starting at their left edge. */
 .jot-import-link-header-heading {
   flex: none;
   width: calc(var(--font-ui-small) * 9.5);
-  padding-inline-start: var(--size-4-3);
 }
 
 .is-phone .jot-import-link-header {

@@ -317,9 +317,9 @@ summary.jot-import-linked-label {
   word-break: break-word;
 }
 
-/* Menu items that make a new note or heading, so they don't read as ones that exist. */
-.jot-import-creates,
-.menu-item:has(.jot-import-creates) .menu-item-icon {
+/* Menu items that make a new note or heading, so they don't read as ones that exist. The title only: coloring
+   the icon needs a parent selector, which the community review flags as slow. */
+.jot-import-creates {
   color: var(--text-accent);
 }
 

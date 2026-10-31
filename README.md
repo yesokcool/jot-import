@@ -22,6 +22,11 @@ On a phone it can be easier to save exports into your vault's **Jots**
 folder. Turn on **Offer to import new Jot exports** in Jot Import's settings and
 it offers to import each new one.
 
+If you use Obsidian Sync, import on one device at a time. After you reinstall
+Obsidian or a device has been offline, wait for Sync to finish before you
+import. Otherwise Sync can merge two copies of an Obsidian note and repeat its
+jots or properties.
+
 ## Install
 
 Search for **Jot Import** in **Settings ▸ Community plugins ▸ Browse**.

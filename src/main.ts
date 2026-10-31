@@ -300,7 +300,10 @@ export default class JotImportPlugin extends Plugin {
     if (pending.size === 0) this.pendingLinks.delete(path);
   }
 
-  /** Resolves when the metadata cache re-reads the file (or after a second), so a list built next sees the change. */
+  /**
+   * Resolves when the metadata cache re-reads the file (or after a second), so a list built next sees the change.
+   * Not `registerEvent`: that keeps every ref until unload, one per link change, and the timeout always removes it.
+   */
   private metadataChange(file: TFile): Promise<void> {
     return new Promise((resolve) => {
       const ref = this.app.metadataCache.on("changed", (changed) => {
@@ -308,7 +311,6 @@ export default class JotImportPlugin extends Plugin {
         this.app.metadataCache.offref(ref);
         resolve();
       });
-      this.registerEvent(ref);
       window.setTimeout(() => {
         this.app.metadataCache.offref(ref);
         resolve();

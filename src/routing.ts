@@ -165,7 +165,7 @@ export function typedNote(
   if (typedFolder?.split(/[\\/]/).some((part) => part.trim().startsWith("."))) return { problem: "A folder name can't start with a dot." };
   const folder = typedFolder === null ? context.folder : cleanFolder(typedFolder);
   const path = joinPath(resolveFolder(context.folders, folder), noteNameFor(name.slice(slash + 1)));
-  if ([...context.exclude].some((p) => fold(p) === fold(path))) return { problem: "That's the export file. Choose another name." };
+  if ([...context.exclude].some((p) => fold(p) === fold(path))) return { problem: "That's the Jot export file. Choose another name." };
   const cleaned = findNote(context.notes, path);
   return cleaned ? { path: cleaned.path, exists: true } : { path, exists: false };
 }

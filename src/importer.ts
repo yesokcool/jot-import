@@ -1,5 +1,5 @@
 /*
- * Plans where each block goes, asks about categories with no linked note, then writes. No Obsidian
+ * Plans where each block goes, shows the user where every category goes, then writes. No Obsidian
  * imports: the plugin passes a `VaultPort` over the real vault and the tests pass one over a map.
  */
 
@@ -439,7 +439,7 @@ export interface ImportJob {
   settings: ImportSettings;
   /** Paths that are never targets (the export file). */
   exclude?: Set<string>;
-  /** Asks which note each new category goes to; null cancels the import before anything is written. */
+  /** Shows where every category goes and asks about new ones, every time; null cancels before anything is written. */
   ask(plan: Plan): Promise<Map<string, LinkChoice> | null>;
   port: VaultPort;
   options: InsertOptions;
@@ -470,7 +470,8 @@ export async function importExport(job: ImportJob): Promise<ImportOutcome | null
   const resumed = job.prior.kind === "stopped" ? job.prior.written : 0;
   const unreadBefore = job.prior.kind === "stopped" ? job.prior.unreadable : 0;
   const plan = planImport({ ...job.parsed, blocks: job.parsed.blocks.slice(resumed) }, job.notes, job.settings, job.exclude);
-  const choices = plan.toLink.length > 0 ? await job.ask(plan) : new Map<string, LinkChoice>();
+  // Asked even when every category is linked, so nothing is written before the user sees where it goes.
+  const choices = plan.writes.length > 0 ? await job.ask(plan) : new Map<string, LinkChoice>();
   if (!choices) return null;
   const writes = resolvePlan(plan, choices);
   const record = (sofar: ImportResult, written: number | null): ImportRecord => {
@@ -527,6 +528,11 @@ function nameList(names: string[], max = 10): string {
   return names.length <= max ? names.join(", ") : `${names.slice(0, max).join(", ")} and ${names.length - max} more`;
 }
 
+/** The sentence naming the notes an import or a link change created. */
+export function createdText(names: string[]): string {
+  return names.length === 1 ? `Created 1 new note: ${nameList(names)}.` : `Created ${names.length} new notes: ${nameList(names)}.`;
+}
+
 export interface SummaryDetails {
   /** Blocks routed by name because the export has no ids. */
   unlinkable?: number;
@@ -542,24 +548,24 @@ export interface SummaryDetails {
 export function summaryText(result: ImportResult, details: SummaryDetails = {}): string {
   const { unlinkable = 0, ambiguous = [], resumed = 0, besideExport = [], left } = details;
   const count = result.notes.length === 1 ? "1 note" : `${result.notes.length} notes`;
-  const parts = [`Jot: added to ${count}: ${nameList(result.notes)}.`];
+  const parts = [`Jot Import added jots to ${count}: ${nameList(result.notes)}.`];
   if (resumed > 0) {
-    parts.push(`Finished the import that stopped earlier, after the ${resumed === 1 ? "category" : `${resumed} categories`} it had added.`);
+    parts.push("Finished the import that was interrupted earlier.");
   }
-  if (result.created.length > 0) parts.push(`Created ${nameList(result.created)}.`);
+  if (result.created.length > 0) parts.push(createdText(result.created));
   if (result.attachments > 0) parts.push(result.attachments === 1 ? "Saved 1 attachment." : `Saved ${result.attachments} attachments.`);
   if (left && left.count > 0) {
     const what = left.count === 1 ? "1 attachment wasn't imported. It's" : `${left.count} attachments weren't imported. They're`;
-    parts.push(`${what} still in ${left.where}, which was kept.`);
+    parts.push(`${what} still in the Jot export file (${left.where}), which was kept.`);
   }
   for (const { name, path, exportPath } of besideExport) {
-    parts.push(`The ${name} jots went to ${baseOf(path)} because this export is in ${baseOf(exportPath)}.`);
+    parts.push(`The ${name} jots went to ${baseOf(path)} because the Jot export file is named ${baseOf(exportPath)}.`);
   }
   if (result.linked.length > 0) {
-    parts.push(result.linked.length === 1 ? "Linked 1 category." : `Linked ${result.linked.length} categories.`);
+    parts.push(result.linked.length === 1 ? "Linked 1 category to an Obsidian note." : `Linked ${result.linked.length} categories to Obsidian notes.`);
   }
-  if (unlinkable > 0) parts.push("This export is from an older Jot, so it went by note name. Update Jot to link categories.");
-  if (ambiguous.length > 0) parts.push(`More than one note is linked to ${nameList(ambiguous)}; the first was used.`);
+  if (unlinkable > 0) parts.push("This export is from an older version of Jot. It linked by Obsidian note name. Update Jot to link categories.");
+  if (ambiguous.length > 0) parts.push(`More than one Obsidian note is linked to ${nameList(ambiguous)}. The first was used.`);
   return parts.join(" ");
 }
 
@@ -570,8 +576,8 @@ export function errorReason(e: unknown): string {
 
 export function stoppedText(error: { path: string; message: string }, result: ImportResult): string {
   const reason = errorReason(error.message);
-  const done = result.notes.length > 0 ? ` Already added to: ${nameList(result.notes)}.` : "";
-  return `Jot Import stopped at ${error.path}: ${reason}.${done} The export file was kept; import it again to finish, and what's in already won't be added twice.`;
+  const done = result.notes.length > 0 ? ` Jots were already added to ${nameList(result.notes)}.` : "";
+  return `Jot Import stopped at ${error.path}: ${reason}.${done} The Jot export file was kept. Import the file again to finish. Jots already imported won't be added twice.`;
 }
 
 /**

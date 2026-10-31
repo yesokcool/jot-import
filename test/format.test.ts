@@ -111,13 +111,13 @@ test("markers that don't pair up are a problem, never a silent loss", () => {
   const head = "<!-- jot:export v=1 -->\n";
   const cases: Array<[string, string]> = [
     // A jot that mentions the end marker would end its category early.
-    ['<!-- jot:category name="Dev" -->\n- the end marker is <!-- /jot:category --> ok\n- second\n<!-- /jot:category -->\n', "pair up"],
+    ['<!-- jot:category name="Dev" -->\n- the end marker is <!-- /jot:category --> ok\n- second\n<!-- /jot:category -->\n', "match up"],
     // A jot that mentions an opening marker.
-    ['<!-- jot:category name="Dev" -->\n- write <!-- jot:category name="X" --> here\n<!-- /jot:category -->\n', "pair up"],
+    ['<!-- jot:category name="Dev" -->\n- write <!-- jot:category name="X" --> here\n<!-- /jot:category -->\n', "match up"],
     // A file cut short: the last category never ends.
     ['<!-- jot:category name="A" -->\n- a\n<!-- /jot:category -->\n<!-- jot:category name="B" -->\n- b\n', "cut short"],
     // A marker this plugin can't read at all.
-    ["<!-- jot:category -->\n- a\n<!-- /jot:category -->\n", "pair up"],
+    ["<!-- jot:category -->\n- a\n<!-- /jot:category -->\n", "match up"],
     // A category with jots but no name.
     ['<!-- jot:category id="9A1E0000-0000-4000-8000-00000000000C" -->\n- no name\n<!-- /jot:category -->\n', "no name"],
     ['<!-- jot:category name="Bad \\q escape" -->\n- bad name\n<!-- /jot:category -->\n', "no name"],

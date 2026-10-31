@@ -28,7 +28,7 @@ export async function openZipExport(data: Uint8Array, limits: ZipLimits = ZIP_LI
   const entries = readZipDirectory(data, limits).filter((e) => !isMacMetadata(e.name));
   // Checked up front so an import never fails halfway, after some jots went in.
   if (entries.some((e) => e.method === 8) && !canInflate()) {
-    throw new ZipError("This device can't unzip files. Unzip the export first, then import the .md file inside.");
+    throw new ZipError("This device can't unzip files. Unzip the Jot export first. Then import the .md file inside it.");
   }
   const texts = entries
     .filter((e) => /\.md$/i.test(e.name))
@@ -50,7 +50,7 @@ export async function openZipExport(data: Uint8Array, limits: ZipLimits = ZIP_LI
       total += file.size;
       media.set(ref, file);
     }
-    if (total > limits.totalBytes) throw new ZipError("The export's attachments are too large to import together.");
+    if (total > limits.totalBytes) throw new ZipError("The attachments in the Jot export are too large to import together.");
     const inMedia = (e: ZipEntry) => e.name.startsWith(`${folder}media/`);
     const linked = new Set(media.values());
     return {
@@ -71,7 +71,7 @@ export function zipMedia(zip: ZipExport): MediaSource {
     has: (ref) => zip.media.has(ref),
     read: (ref) => {
       const entry = zip.media.get(ref);
-      if (!entry) throw new ZipError("The file isn't in the zip.");
+      if (!entry) throw new ZipError("An attachment is missing from the zip.");
       return zip.read(entry);
     },
   };

@@ -83,9 +83,9 @@ export function readZipDirectory(data: Uint8Array, limits: ZipLimits = ZIP_LIMIT
   if (data.length > limits.zipBytes) throw new ZipError("The zip is too large to import.");
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const end = findEnd(view);
-  if (end < 0) throw new ZipError("The zip is damaged or not a zip.");
+  if (end < 0) throw new ZipError("The file is damaged or isn't a zip.");
   if (view.getUint16(end + 4, true) !== 0 || view.getUint16(end + 6, true) !== 0) {
-    throw new ZipError("The zip is split into parts, which Jot Import can't read.");
+    throw new ZipError("The zip is split into parts. Jot Import can't read split zips.");
   }
   let count = view.getUint16(end + 10, true);
   let size = view.getUint32(end + 12, true);
@@ -97,13 +97,13 @@ export function readZipDirectory(data: Uint8Array, limits: ZipLimits = ZIP_LIMIT
     start = z64.start;
   }
   if (count > limits.entries) throw new ZipError("The zip holds too many files to import.");
-  if (start + size > end) throw new ZipError("The zip is damaged or not a zip.");
+  if (start + size > end) throw new ZipError("The file is damaged or isn't a zip.");
 
   const decoder = new TextDecoder("utf-8");
   const entries: ZipEntry[] = [];
   let at = start;
   for (let i = 0; i < count; i++) {
-    if (at + 46 > end || view.getUint32(at, true) !== CENTRAL) throw new ZipError("The zip is damaged or not a zip.");
+    if (at + 46 > end || view.getUint32(at, true) !== CENTRAL) throw new ZipError("The file is damaged or isn't a zip.");
     const flags = view.getUint16(at + 8, true);
     const method = view.getUint16(at + 10, true);
     const crc = view.getUint32(at + 16, true);
@@ -114,7 +114,7 @@ export function readZipDirectory(data: Uint8Array, limits: ZipLimits = ZIP_LIMIT
     const commentLength = view.getUint16(at + 32, true);
     let offset = view.getUint32(at + 42, true);
     const nameStart = at + 46;
-    if (nameStart + nameLength + extraLength > end) throw new ZipError("The zip is damaged or not a zip.");
+    if (nameStart + nameLength + extraLength > end) throw new ZipError("The file is damaged or isn't a zip.");
     // Apple's zips are UTF-8 without saying so (flag bit 11 unset), so names are always read as UTF-8.
     const raw = decoder.decode(data.subarray(nameStart, nameStart + nameLength));
     const name = raw.normalize("NFC");
@@ -128,13 +128,13 @@ export function readZipDirectory(data: Uint8Array, limits: ZipLimits = ZIP_LIMIT
     offset = z64.offset ?? offset;
     at = nameStart + nameLength + extraLength + commentLength;
 
-    if (!isSafeEntryName(name)) throw new ZipError("The zip has a file path that points outside its folder.");
+    if (!isSafeEntryName(name)) throw new ZipError("A file path in the zip points outside the zip.");
     if (name.endsWith("/")) continue;
     if (flags & 0x1) throw new ZipError("The zip is encrypted.");
-    if (method !== 0 && method !== 8) throw new ZipError("The zip uses a compression Jot Import can't read.");
+    if (method !== 0 && method !== 8) throw new ZipError("The zip uses a compression method Jot Import can't read.");
     if (uncompressed > limits.entryBytes) throw new ZipError("A file in the zip is too large to import.");
-    if (method === 0 && compressedSize !== uncompressed) throw new ZipError("The zip is damaged or not a zip.");
-    if (offset + 30 + compressedSize > start) throw new ZipError("The zip is damaged or not a zip.");
+    if (method === 0 && compressedSize !== uncompressed) throw new ZipError("The file is damaged or isn't a zip.");
+    if (offset + 30 + compressedSize > start) throw new ZipError("The file is damaged or isn't a zip.");
     entries.push({ name, method, compressedSize, size: uncompressed, crc, offset });
   }
   return entries;
@@ -147,14 +147,14 @@ export function readZipDirectory(data: Uint8Array, limits: ZipLimits = ZIP_LIMIT
 export async function readZipEntry(data: Uint8Array, entry: ZipEntry): Promise<Uint8Array> {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   if (entry.offset + 30 > data.length || view.getUint32(entry.offset, true) !== LOCAL) {
-    throw new ZipError("The zip is damaged or not a zip.");
+    throw new ZipError("The file is damaged or isn't a zip.");
   }
   // The local header's own name and extra lengths: its extra field can differ from the central one.
   const start = entry.offset + 30 + view.getUint16(entry.offset + 26, true) + view.getUint16(entry.offset + 28, true);
-  if (start + entry.compressedSize > data.length) throw new ZipError("The zip is damaged or not a zip.");
+  if (start + entry.compressedSize > data.length) throw new ZipError("The file is damaged or isn't a zip.");
   const packed = data.subarray(start, start + entry.compressedSize);
   const bytes = entry.method === 0 ? packed.slice() : await inflate(packed, entry.size);
-  if (crc32(bytes) !== entry.crc) throw new ZipError("The zip is damaged: a file in it doesn't match its checksum.");
+  if (crc32(bytes) !== entry.crc) throw new ZipError("The zip is damaged. A file in the zip doesn't match its checksum.");
   return bytes;
 }
 
@@ -162,7 +162,7 @@ const INFLATE_CHUNK = 1024 * 1024;
 
 async function inflate(packed: Uint8Array, size: number): Promise<Uint8Array> {
   if (!canInflate()) {
-    throw new ZipError("This device can't unzip files. Unzip the export first, then import the .md file inside.");
+    throw new ZipError("This device can't unzip files. Unzip the Jot export first. Then import the .md file inside it.");
   }
   const out = new Uint8Array(size);
   let filled = 0;
@@ -184,15 +184,15 @@ async function inflate(packed: Uint8Array, size: number): Promise<Uint8Array> {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (filled + value.length > size) throw new ZipError("The zip is damaged: a file in it is larger than it says.");
+      if (filled + value.length > size) throw new ZipError("The zip is damaged. A file in the zip is larger than the zip says.");
       out.set(value, filled);
       filled += value.length;
     }
   } catch (e) {
     void reader.cancel().catch(() => undefined);
-    throw e instanceof ZipError ? e : new ZipError("The zip is damaged: a file in it can't be unpacked.");
+    throw e instanceof ZipError ? e : new ZipError("The zip is damaged. A file in the zip can't be unpacked.");
   }
-  if (filled !== size) throw new ZipError("The zip is damaged: a file in it is shorter than it says.");
+  if (filled !== size) throw new ZipError("The zip is damaged. A file in the zip is shorter than the zip says.");
   return out;
 }
 
@@ -210,9 +210,9 @@ function findEnd(view: DataView): number {
 
 function zip64End(view: DataView, end: number): { count: number; size: number; start: number } {
   const locator = end - 20;
-  if (locator < 0 || view.getUint32(locator, true) !== ZIP64_LOCATOR) throw new ZipError("The zip is damaged or not a zip.");
+  if (locator < 0 || view.getUint32(locator, true) !== ZIP64_LOCATOR) throw new ZipError("The file is damaged or isn't a zip.");
   const record = safeNumber(view.getBigUint64(locator + 8, true));
-  if (record + 56 > locator || view.getUint32(record, true) !== ZIP64_EOCD) throw new ZipError("The zip is damaged or not a zip.");
+  if (record + 56 > locator || view.getUint32(record, true) !== ZIP64_EOCD) throw new ZipError("The file is damaged or isn't a zip.");
   return {
     count: safeNumber(view.getBigUint64(record + 32, true)),
     size: safeNumber(view.getBigUint64(record + 40, true)),
@@ -232,11 +232,11 @@ function readZip64Extra(
   while (at + 4 <= end) {
     const id = view.getUint16(at, true);
     const len = view.getUint16(at + 2, true);
-    if (at + 4 + len > end) throw new ZipError("The zip is damaged or not a zip.");
+    if (at + 4 + len > end) throw new ZipError("The file is damaged or isn't a zip.");
     if (id === 0x0001) {
       let p = at + 4;
       const read = () => {
-        if (p + 8 > at + 4 + len) throw new ZipError("The zip is damaged or not a zip.");
+        if (p + 8 > at + 4 + len) throw new ZipError("The file is damaged or isn't a zip.");
         const v = safeNumber(view.getBigUint64(p, true));
         p += 8;
         return v;
@@ -249,7 +249,7 @@ function readZip64Extra(
     }
     at += 4 + len;
   }
-  throw new ZipError("The zip is damaged or not a zip.");
+  throw new ZipError("The file is damaged or isn't a zip.");
 }
 
 function safeNumber(value: bigint): number {

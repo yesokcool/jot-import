@@ -131,7 +131,7 @@ test("a file name with spaces, brackets or an odd extension, as older Jot wrote 
 test("zip slip: a path that climbs out of its folder refuses the whole zip", async () => {
   for (const name of ["../evil.md", "export/../../evil.png", "/etc/evil.md", "C:/evil.md", "export\\..\\evil.md"]) {
     assert.ok(!isSafeEntryName(name), name);
-    await rejects(buildZip([{ name: "export/export.md", data: EXPORT }, { name, data: "x" }]), /outside its folder/);
+    await rejects(buildZip([{ name: "export/export.md", data: EXPORT }, { name, data: "x" }]), /points outside the zip/);
   }
   assert.ok(isSafeEntryName("export/media/AAAA.png"));
   assert.ok(isSafeEntryName("export/..notes/a.md"), "dots inside a name are fine");
@@ -148,7 +148,7 @@ test("huge files: a size over the limit is refused before anything is unpacked",
     { name: "export/media/AAAA.png", data: new Uint8Array(1024 * 1024), size: 10 },
   ]);
   const opened = await openZipExport(bomb);
-  await assert.rejects(opened.read(opened.media.get("media/AAAA.png")!), /larger than it says/);
+  await assert.rejects(opened.read(opened.media.get("media/AAAA.png")!), /larger than the zip says/);
 });
 
 test("on a phone or tablet the limits are half as large, with the same notices", async () => {
@@ -177,7 +177,7 @@ test("on a phone or tablet the limits are half as large, with the same notices",
   assert.equal((await openZipExport(many)).media.size, 3);
   await assert.rejects(
     openZipExport(many, MOBILE_ZIP_LIMITS),
-    (e: unknown) => e instanceof ZipError && e.message === "The export's attachments are too large to import together.",
+    (e: unknown) => e instanceof ZipError && e.message === "The attachments in the Jot export are too large to import together.",
   );
   assert.throws(() => readZipDirectory({ length: 600 * MB } as Uint8Array, MOBILE_ZIP_LIMITS), /The zip is too large to import\./);
 });
@@ -222,12 +222,12 @@ test("a ZIP64 field longer than the extra data it's in is refused, not read from
     { name: "export/export.md", data: EXPORT, stored: true },
     { name: "export/media/AAAA.png", data: "x", stored: true, zip64: true, extra: new Uint8Array(extra.buffer), comment: new Uint8Array(comment.buffer) },
   ]);
-  await rejects(zip, /damaged or not a zip/);
+  await rejects(zip, /damaged or isn't a zip/);
 });
 
 test("damaged and unsupported zips say why", async () => {
   const good = buildZip([{ name: "export/export.md", data: EXPORT }]);
-  await rejects(good.subarray(0, good.length - 30), /damaged or not a zip/);
+  await rejects(good.subarray(0, good.length - 30), /damaged or isn't a zip/);
   await rejects(buildZip([{ name: "export/export.md", data: EXPORT, crc: 1234 }]), /checksum/);
   await rejects(buildZip([{ name: "export/export.md", data: EXPORT, flags: 0x0801 }]), /encrypted/);
   await rejects(buildZip([{ name: "export/notes.md", data: "# Not an export\n" }]), /no Jot export/);

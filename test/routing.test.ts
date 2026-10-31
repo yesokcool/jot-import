@@ -202,7 +202,7 @@ test("a note typed in the dialog: an existing one, a new one in a folder, or why
   for (const typed of ["../Gifts", "Jot/../../Gifts", "./Gifts", ".obsidian/plugins/Gifts", "Jot/.hidden/Gifts"]) {
     assert.deepEqual(typedNote(typed, context), { problem: "A folder name can't start with a dot." }, typed);
   }
-  assert.deepEqual(typedNote("jot-export-2026-10-29-0910", context), { problem: "That's the export file. Choose another name." });
+  assert.deepEqual(typedNote("jot-export-2026-10-29-0910", context), { problem: "That's the Jot export file. Choose another name." });
   assert.deepEqual(typedNote("Projects/", context), { problem: "Type a note name." });
   assert.deepEqual(typedNote("  ", context), { problem: "Type a note name." });
 });

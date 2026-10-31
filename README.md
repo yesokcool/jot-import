@@ -34,25 +34,28 @@ row starts on:
 - the note with the category's name or alias, if there is one that isn't
   linked to another category;
 - **Choose a note**, if no such note exists but some have similar names
-  (*Project Ideas* for *Ideas*), or the note with its name in the Folder
+  (*Project Ideas* for *Ideas*), or the note with its name in the default folder
   already holds another category's jots. The import waits until you pick one;
-- a new note with the category's name in the Folder, if nothing is similar.
+- a new note with the category's name in the default folder, if nothing is similar.
 
 A new note is numbered (*Inbox 1*) when the note with its name holds another
 category's jots, or another category in the export makes the same file name
 (*C* and *C#*).
 
 Tap a row's note to change it. The menu lists the similar notes and a new
-note, and **Choose note and heading…** lets you search for any note or type a
+note, and **Find or create a note…** lets you search for any note or type a
 name for a new one (put a folder and a slash in front to choose where it
-goes). The button after the note picks the heading the jots go under. Then
+goes). The **Heading** button after the note picks the heading the jots go
+under. Then
 tap **Link all and import**.
 
 The export's categories that already have a note are listed too, under
 **Already linked**, so you can move one to another note or heading on the
-way. Its link leaves the old note, which keeps its jots. The dialog only
-opens when a category is new; the **Change where categories go** button in
-the settings opens it for every linked category, without importing.
+way. Its link leaves the old note, which keeps its jots. The dialog opens for
+every import, even when every category is already linked: it then says so
+with a check, the categories folded away, and nothing is written until you
+tap **Import**. The **Change where categories go** button in the settings
+opens it for every linked category, without importing.
 
 ![The dialog that asks which note each category goes to.](link-dialog.png)
 
@@ -72,13 +75,14 @@ can change its heading or unlink it, or change several at once with **Change
 where categories go**.
 
 **Workspaces.** A category that's in a workspace in Jot gets its new note in a
-folder named after the workspace, inside the Folder: Work's *Inbox* goes to
+folder named after the workspace, inside the default folder: Work's *Inbox* goes to
 `Jots/Work/Inbox.md` and Home's to `Jots/Home/Inbox.md`. Older exports don't
-name workspaces, so their new notes go in the Folder.
+name workspaces, so their new notes go in the default folder.
 
 **Exports from older versions of Jot** have no category ids, so nothing can be
-linked and the dialog doesn't open: each category's jots go into the note with
-its name in the Folder, created if it's missing. Case doesn't matter, and
+linked: each category's jots go into the note with its name in the default
+folder, created if it's missing. A dialog shows where each category goes, and
+nothing is written until you tap **Import**. Case doesn't matter, and
 characters Obsidian can't use in file names are replaced (*Work / Life* goes
 into `Work - Life.md`). Update Jot to choose notes.
 
@@ -86,14 +90,14 @@ into `Work - Life.md`). Update Jot to choose notes.
 
 | Setting | What it does |
 |---|---|
-| **Folder for new notes** | Where new notes are created. A workspace's categories use a folder in it named after the workspace. **Jots** to start; empty is the vault root. |
+| **Default folder for new notes** | Where new notes are created. A workspace's categories use a folder in it named after the workspace. **Jots** to start; empty is the vault root. |
 | **Position** | **Top** (the default) or **Bottom** of the note, or of the heading's section. Top is right after the note's properties. To put the jots under the note's `# Title`, make it the heading. |
-| **Heading** | Put the jots under this heading, added if the note doesn't have it. Type `### Inbox` to set its level; `Inbox` alone makes `## Inbox`. A linked category's own heading takes its place. |
-| **New headings go at** | Where a missing heading is added: the bottom of the note (the default) or the top, right after its properties. |
+| **Default heading** | Put the jots under this heading, added if the note doesn't have it. Type `### Inbox` to set its level; `Inbox` alone makes `## Inbox`. A linked category's own heading takes its place. |
+| **Default heading position** | Where a missing heading is added: the bottom of the note (the default) or the top, right after its properties. |
 | **Blank lines before** / **after** | Blank lines between the jots and the text above and below them, from none to 3. 1 to start. |
-| **Start line** / **End line** | A line above and below each import's jots. They start as `*Jots imported {{date}}*` and `---`. `{{date}}` and `{{time}}` are when you import; `{{date:YYYY-MM-DD}}` sets the format. Empty means no line. |
-| **Trash export files after importing** | On to start. Only for exports in the vault. A file chosen from elsewhere is never touched. |
-| **Offer to import new exports** | On to start. Shows a notice when an export is saved in the exports folder. |
+| **Start marker** / **End marker** | A line above and below each import's jots. They start as `*Jots imported {{date}}*` and `---`. `{{date}}` and `{{time}}` are when you import; `{{date:YYYY-MM-DD}}` sets the format. Empty means no line. |
+| **Trash Jot exports after importing** | On to start. Only for exports in the vault. A file chosen from elsewhere is never touched. |
+| **Offer to import new Jot exports** | On to start. Shows a notice when an export is saved in the exports folder. |
 | **Exports folder** | The folder, and the folders in it, watched for new exports. **Jots** to start; the vault root watches the whole vault. |
 | **Shorten long paths** | Where the dialog cuts a path that doesn't fit: at the start, in the middle (the default) or at the end. |
 | **Collapse already-linked categories** | Off to start. In the dialog, the categories that already have a note start folded away behind a row you tap to open. |

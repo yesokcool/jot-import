@@ -23,24 +23,24 @@ export class JotImportSettingTab extends PluginSettingTab {
     const links = this.linkedNotes();
     return [
       {
-        name: "Folder for new notes",
-        desc: "Where a category's note is created if you don't choose an existing one.",
+        name: "Default folder for new notes",
+        desc: "The folder where new Obsidian notes are created if you don't link an existing Obsidian note to a Jot category.",
         control: { type: "folder", key: "folder", placeholder: "Vault root", includeRoot: true },
       },
       {
         name: "Position",
-        desc: "Where new jots go in the note, or in the heading's section.",
+        desc: "Where new jots are placed in the Obsidian note, or the selected heading.",
         control: { type: "dropdown", key: "position", options: { top: "Top", bottom: "Bottom" }, defaultValue: "top" },
       },
       {
-        name: "Heading",
-        desc: "Put the jots under this heading. It's added to the note if missing. Type ### Inbox to choose its level. A linked note can have its own heading, below.",
+        name: "Default heading",
+        desc: "The default heading where jots go under. The heading is created if missing. Type ### Inbox to choose its level.",
         // "None" rather than an example, which reads as a value already set.
         control: { type: "text", key: "heading", placeholder: "None" },
       },
       {
-        name: "New headings go at",
-        desc: "Where a heading is added when the note doesn't have it yet. The top is right after the note's properties.",
+        name: "Default heading position",
+        desc: "Where the default heading is added if the Obsidian note doesn't have it yet.",
         control: {
           type: "dropdown",
           key: "newHeadingPosition",
@@ -50,42 +50,42 @@ export class JotImportSettingTab extends PluginSettingTab {
       },
       {
         name: "Blank lines before",
-        desc: "Between the imported jots and the text above them.",
+        desc: "Adds blank lines as padding between the imported jots and the text above them.",
         control: { type: "dropdown", key: "blankLinesBefore", options: BLANK_LINES, defaultValue: "1" },
       },
       {
         name: "Blank lines after",
-        desc: "Between the imported jots and the text below them.",
+        desc: "Adds blank lines as padding between the imported jots and the text below them.",
         control: { type: "dropdown", key: "blankLinesAfter", options: BLANK_LINES, defaultValue: "1" },
       },
       {
-        name: "Start line",
-        desc: "Written above each import's jots. {{date}} is the day you import. Leave it empty for none.",
+        name: "Start marker",
+        desc: "Marks where a Jot Import started. {{date}} is the day you import. Leave it empty for none.",
         control: { type: "text", key: "startMarker", placeholder: "None" },
       },
       {
-        name: "End line",
-        desc: "Written below each import's jots. --- is a divider line. Leave it empty for none.",
+        name: "End marker",
+        desc: "Marks where a Jot Import ended. Leave it empty for none.",
         control: { type: "text", key: "endMarker", placeholder: "None" },
       },
       {
-        name: "Trash export files after importing",
-        desc: "Only files in the vault. A file you choose from elsewhere is never touched.",
+        name: "Trash Jot exports after importing",
+        desc: "Moves Jot exports to trash after importing them. This only affects Jot exports placed inside the vault, not files chosen from outside the vault.",
         control: { type: "toggle", key: "trashAfterImport", defaultValue: true },
       },
       {
-        name: "Offer to import new exports",
-        desc: "When a Jot export is saved in the exports folder, ask whether to import it. It's never imported without asking.",
+        name: "Offer to import new Jot exports",
+        desc: "Automatically asks to import Jot exports when placed inside the Exports folder. It's never imported without asking.",
         control: { type: "toggle", key: "offerNewExports", defaultValue: true },
       },
       {
         name: "Exports folder",
-        desc: "Save Jot exports here to be asked about them. Only this folder and the folders in it are looked at; the vault root means the whole vault.",
+        desc: "Save Jot exports here to automatically open a dialog to import them. The plugin only searches this folder and the folders in it for Jot exports.",
         control: { type: "folder", key: "exportsFolder", placeholder: "Vault root", includeRoot: true },
       },
       {
         name: "Shorten long paths",
-        desc: "Where a note's path is cut when it doesn't fit in the choose-notes dialog. Hover over it to see all of it.",
+        desc: "Decides where long Obsidian note paths are truncated when they don't fit in the choose-notes dialog window. Hover over the path to see the whole path.",
         control: {
           type: "dropdown",
           key: "shortenPaths",
@@ -95,24 +95,24 @@ export class JotImportSettingTab extends PluginSettingTab {
       },
       {
         name: "Collapse already-linked categories",
-        desc: "When the choose-notes dialog opens for a new category, the ones that already have a note start folded away.",
+        desc: "When the choose-notes dialog window opens, automatically collapse categories which have already been linked to Obsidian notes.",
         control: { type: "toggle", key: "collapseLinked", defaultValue: false },
       },
       {
         name: "Change where categories go",
-        desc: "Choose another note or heading for any linked category. Nothing is imported.",
+        desc: "Choose another Obsidian note or heading for any linked category.",
         visible: links.length > 0,
         render: (setting) => {
           setting
             .setName("Change where categories go")
-            .setDesc("Choose another note or heading for any linked category. Nothing is imported.")
+            .setDesc("Choose another Obsidian note or heading for any linked category.")
             .addButton((btn) => btn.setButtonText("Change…").onClick(() => void this.plugin.changeLinks()));
         },
       },
       {
         type: "list",
         heading: "Linked notes",
-        emptyState: "None yet. You choose a note for each category the first time it's imported.",
+        emptyState: "None yet. You choose an Obsidian note for each category the first time it's imported.",
         items: links.map(
           (link): SettingDefinition => ({
             // Obsidian keys list rows by name, so it must be unique; render shows the category alone.
@@ -143,7 +143,7 @@ export class JotImportSettingTab extends PluginSettingTab {
                 .addExtraButton((btn) =>
                   btn
                     .setIcon("unlink")
-                    .setTooltip("Unlink. The note and its jots stay.")
+                    .setTooltip("Unlink. Jots in the Obsidian note remain unaffected.")
                     .onClick(async () => {
                       await this.plugin.unlink(link.path, link.id);
                       this.update();

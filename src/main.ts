@@ -3,6 +3,7 @@ import { dataToSave, DEFAULT_SETTINGS, type JotImportSettings, mergeState, type 
 import { fillMarker, isJotExport, isWholeExport, parseJotExport } from "./format.ts";
 import {
   applyLinkMoves,
+  createdText,
   errorReason,
   exportToOffer,
   fingerprint,
@@ -22,7 +23,7 @@ import {
   summaryText,
   type VaultPort,
 } from "./importer.ts";
-import { type LinkContext, LinkModal } from "./link-modal.ts";
+import { ByNameModal, type LinkContext, LinkModal } from "./link-modal.ts";
 import {
   aliasesFrom,
   HEADING_PROPERTY,
@@ -212,7 +213,7 @@ export default class JotImportPlugin extends Plugin {
   /** The settings' "Change where categories go": the dialog for every linked category, then only the links move. */
   async changeLinks(): Promise<void> {
     if (this.busy) {
-      new Notice("An import is running. Try again in a moment.");
+      new Notice("A Jot import is already running. Try again in a moment.");
       return;
     }
     this.busy = true;
@@ -233,7 +234,7 @@ export default class JotImportPlugin extends Plugin {
       if (moves.length === 0) return;
       const { created } = await applyLinkMoves(moves, port);
       const moved = moves.length === 1 ? "Changed where 1 category goes." : `Changed where ${moves.length} categories go.`;
-      new Notice(created.length > 0 ? `${moved} Created ${created.join(", ")}.` : moved);
+      new Notice(created.length > 0 ? `${moved} ${createdText(created)}` : moved);
     } catch (e) {
       new Notice(`Jot Import couldn't change the links: ${errorReason(e)}.`, 0);
     } finally {
@@ -331,14 +332,14 @@ export default class JotImportPlugin extends Plugin {
     try {
       return await work();
     } catch (e) {
-      new Notice(`Jot Import couldn't finish: ${errorReason(e)}. The export file was kept.`, 0);
+      new Notice(`Jot Import couldn't finish: ${errorReason(e)}. The Jot export file was kept.`, 0);
       return null;
     }
   }
 
   private async importFromVault(file: TFile): Promise<void> {
     if (!this.app.vault.getFileByPath(file.path)) {
-      new Notice(`${file.name} is gone. It may have been imported on another device.`);
+      new Notice(`${file.name} is no longer in the vault. The file may have been imported on another device.`);
       return;
     }
     if (file.extension === "zip") return this.importVaultZip(file);
@@ -353,7 +354,7 @@ export default class JotImportPlugin extends Plugin {
     if (isWholeExport(text) && (await this.app.vault.read(file)) === text) {
       await this.app.fileManager.trashFile(file);
     } else {
-      new Notice(`Kept ${file.name} because it holds more than the imported export.`);
+      new Notice(`Kept ${file.name} because the file has more in it than the Jot export.`);
     }
   }
 
@@ -374,7 +375,7 @@ export default class JotImportPlugin extends Plugin {
     if (zip.onlyExport && isWholeExport(zip.text) && stampOf(still) === stamp) {
       await this.app.fileManager.trashFile(still);
     } else {
-      new Notice(`Kept ${file.name} because it holds more than the imported export.`);
+      new Notice(`Kept ${file.name} because the file has more in it than the Jot export.`);
     }
   }
 
@@ -408,7 +409,7 @@ export default class JotImportPlugin extends Plugin {
   /** Returns null when nothing was written (not an export, cancelled or failed), so the caller keeps the file. */
   private async importOnce(text: string, origin: ExportOrigin): Promise<Imported | null> {
     if (this.busy) {
-      new Notice("An import is already running. Try again in a moment.");
+      new Notice("A Jot import is already running. Try again in a moment.");
       return null;
     }
     this.busy = true;
@@ -424,14 +425,14 @@ export default class JotImportPlugin extends Plugin {
     if (!parsed) {
       new Notice(
         isJotExport(text)
-          ? "This export is from a newer Jot. Update Jot Import to read it."
-          : "That file is not a Jot export this plugin understands.",
+          ? "This Jot export is from a newer version of Jot. Update Jot Import to import it."
+          : "That file isn't a Jot export.",
       );
       return null;
     }
     if (parsed.problem) {
       // Importing anyway would drop the cut-off jots and then trash their only copy.
-      new Notice(`Jot Import can't import this export without losing jots. ${parsed.problem} The file was kept.`, 0);
+      new Notice(`Jot Import can't import this Jot export without losing jots. ${parsed.problem} The file was kept.`, 0);
       return null;
     }
     if (parsed.blocks.length === 0) {
@@ -457,11 +458,17 @@ export default class JotImportPlugin extends Plugin {
       notes,
       settings: { ...this.settings, folder: resolveFolder(folders, this.settings.folder), folders },
       exclude,
-      ask: (plan) =>
-        LinkModal.ask(this.app, plan.toLink, this.linkContext(notes, exclude), {
-          linked: plan.linked,
-          collapseLinked: this.settings.collapseLinked,
-        }),
+      ask: async (plan) => {
+        if (plan.toLink.length > 0 || plan.linked.length > 0) {
+          return LinkModal.ask(this.app, plan.toLink, this.linkContext(notes, exclude), {
+            linked: plan.linked,
+            collapseLinked: this.settings.collapseLinked,
+          });
+        }
+        // An older export goes by note name, so there's nothing to choose, only to confirm.
+        const rows = plan.writes.flatMap((w) => (w.path === null ? [] : [{ category: w.block.name, path: w.path, exists: port.exists(w.path) }]));
+        return (await ByNameModal.ask(this.app, rows, this.settings.shortenPaths)) ? new Map() : null;
+      },
       port,
       options: {
         position: this.settings.position,
@@ -637,7 +644,7 @@ function stampOf(file: TFile): string {
 }
 
 function zipProblem(name: string, e: unknown): string {
-  const reason = e instanceof ZipError ? e.message : "It can't be read as a zip.";
+  const reason = e instanceof ZipError ? e.message : "The file can't be read as a zip.";
   return `Jot Import can't import ${name}. ${reason}`;
 }
 
@@ -652,9 +659,9 @@ function confirmReimport(app: App, importedAt: number): Promise<boolean> {
   return new Promise((resolve) => {
     const modal = new Modal(app);
     let answered = false;
-    modal.setTitle("Import this export again?");
+    modal.setTitle("Import this Jot export again?");
     modal.contentEl.createEl("p", {
-      text: `You imported this exact file on ${new Date(importedAt).toLocaleString()}. Importing it again adds the same jots a second time.`,
+      text: `You imported this Jot export on ${new Date(importedAt).toLocaleString()}. Importing it again adds the same jots a second time.`,
     });
     new Setting(modal.contentEl)
       .addButton((btn) => btn.setButtonText("Cancel").onClick(() => modal.close()))
@@ -746,7 +753,7 @@ class ObsidianVault implements VaultPort {
 
   private file(path: string): TFile {
     const file = this.app.vault.getFileByPath(normalizePath(path));
-    if (!file) throw new Error("the note is missing");
+    if (!file) throw new Error("the Obsidian note is missing");
     return file;
   }
 
@@ -796,7 +803,7 @@ class ImportModal extends Modal {
 
     new Setting(contentEl)
       .setName("Choose a file")
-      .setDesc("A .md or .zip file exported from Jot with Obsidian Format on.")
+      .setDesc("A .md or .zip file exported from Jot with Obsidian Format toggled on.")
       .addButton((btn) => {
         btn.setButtonText("Choose…").setCta().onClick(() => input.click());
       });
@@ -823,7 +830,7 @@ class ImportModal extends Modal {
     if (text === null) return when;
     const prior = this.plugin.priorImport(text);
     if (prior.kind === "done") return `${when}. Already imported.`;
-    if (prior.kind === "stopped") return `${when}. Stopped partway; importing it again finishes it.`;
+    if (prior.kind === "stopped") return `${when}. Import was interrupted. Importing it again will finish it.`;
     return when;
   }
 

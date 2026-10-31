@@ -127,8 +127,8 @@ function markerProblem(text: string, matched: number): string | null {
   const lastOpen = opens.length > 0 ? opens[opens.length - 1] : -1;
   const lastClose = closes.length > 0 ? closes[closes.length - 1] : -1;
   return lastOpen > lastClose
-    ? "Its last category never ends, so the file may be cut short."
-    : "Its category markers don't pair up, maybe because a jot contains marker text.";
+    ? "The last category in the Jot export has no end marker. The file may be cut short."
+    : "The category markers in the Jot export don't match up. A jot may contain text that looks like a marker.";
 }
 
 /** `key="json string"` or `key=bare` pairs in any order; callers ignore unknown keys so the format can grow. */
